@@ -37,8 +37,9 @@ named prerequisite rather than assumed.
 ## 2. Goals
 
 1. Teams self-serve alerting and recording rules through PRs into their own folder.
-2. A rule that passes CI and syncs in ArgoCD is actually loaded by a ruler, or
-   something tells us it is not.
+2. A rule that passes CI and syncs in ArgoCD is very likely loaded by a ruler.
+   The residual gap, that per-rule delivery is not verified end to end, is stated
+   explicitly in Section 10 rather than assumed away.
 3. Moving from one tenant to many is a values change, not a migration.
 4. Alerts about the metrics stack keep working when the metrics stack is down.
 
@@ -96,7 +97,12 @@ Subfolders below the target level are permitted for grouping, for example
 - Alerts: `<service>[-<type>]-alerts.yaml`
 - Recording rules: `<service>-rules.yaml`
 - Unit tests: `<service>-alerts-tests.yaml`
-- Filenames must match `^[a-z0-9-]+\.yaml$`
+- Filenames must match `^[a-z0-9-]+\.yaml$`.
+- Every team and grouping directory segment must match
+  `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` and be at most 63 bytes.
+- Generated ConfigMap names and data keys must each be at most 253 bytes. The
+  template fails rather than truncating.
+- Alert names must be unique across the whole repository (see Section 4).
 
 ***REMOVED*** silently rewrote `_` to `-` when deriving object names. A CI error is
 better than a silent rename.
@@ -119,30 +125,46 @@ enforces the consequences:
 | label `owner` | equals the containing team folder |
 | annotation `summary` | required (`message` and `description` accepted as aliases) |
 | annotation `runbook_url` or `dashboard_url` | at least one required |
+| alert name | unique across the entire repository |
+
+The uniqueness requirement exists because **alerts do not automatically carry the
+rule namespace or source file as a label.** Mimir invokes the Prometheus rule
+manager with empty external labels, and Prometheus adds no file label of its own.
+Two identically named alerts in different files with otherwise identical labels
+are therefore indistinguishable to Alertmanager and will be deduplicated. Unique
+names are the cheapest fix and cost teams nothing they would not do anyway.
 
 Alertmanager is out of scope, but `owner` is the label routing will key on later.
 Making it unfakeable now is cheaper than reconciling it after eighty alerts exist.
 
 ### Environment selectors: one canonical form
 
+The ordered environment list is `dev`, `staging`, `prod`. An expression with no
+`deployment_environment` matcher applies to all three.
+
 While a single tenant holds every environment, an environment-specific rule must
 filter in PromQL. That is unavoidable. What is avoidable is variation. CI requires
 exactly:
 
 ```promql
-deployment_environment=~"preprod|prod"
+deployment_environment=~"staging|prod"
 ```
 
-Regex match, double quotes, pipe-separated values drawn from a known list, no
-negation, no plain `=`. If an expression contains the selector more than once,
-every occurrence must be identical.
+Regex match, double quotes, no whitespace around the operator, a non-empty subset
+of the ordered environment list in list order without duplicates, no negation, no
+plain `=`. If an expression contains the matcher more than once, every occurrence
+must be byte-identical.
+
+CI parses the PromQL and LogQL selector AST rather than matching raw YAML text, so
+a matcher inside a comment or a differently formatted expression cannot slip past.
 
 This is the single highest-leverage decision in the spec for goal 3. It makes the
 environment set of every rule machine-readable **from the rule itself**, so a
 future tenant split can parse the selector, emit the ConfigMap into exactly those
 tenants, and delete the selector, with no team re-declaring anything and no file
-moves. ***REMOVED*** accumulated 229 selectors in 8 different shapes including a lone
-negation, which would have made the same migration an archaeology exercise.
+moves. ***REMOVED*** accumulated 210 matchers across its deployable rules in 8
+different shapes including a lone negation, which would have made the same
+migration an archaeology exercise.
 
 ## 5. The chart
 
@@ -153,27 +175,64 @@ target: mimir     # mimir | loki | prometheus
 tenant: <name>    # ruler directory for mimir and loki; object-name prefix only for prometheus
 ```
 
+`values.schema.json` rejects bad input before rendering:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target", "tenant"],
+  "properties": {
+    "target": { "type": "string", "enum": ["mimir", "loki", "prometheus"] },
+    "tenant": {
+      "type": "string", "minLength": 1, "maxLength": 63,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+    "allowEmpty": { "type": "boolean", "default": false }
+  }
+}
+```
+
 `templates/configmaps.yaml`:
 
 ```gotemplate
-{{- $target := .Values.target -}}
-{{- range $path, $_ := .Files.Glob (printf "rules/*/%s/**.yaml" $target) }}
+{{- $target := required "values.target is required" .Values.target -}}
+{{- if not (has $target (list "mimir" "loki" "prometheus")) -}}
+  {{- fail (printf "values.target must be mimir, loki or prometheus; got %q" $target) -}}
+{{- end -}}
+{{- $tenant := required "values.tenant is required" .Values.tenant -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $tenant) -}}
+  {{- fail (printf "values.tenant must be a DNS label; got %q" $tenant) -}}
+{{- end -}}
+{{- $matched := .Files.Glob (printf "rules/*/%s/**.yaml" $target) -}}
+{{- if and (eq (len $matched) 0) (not .Values.allowEmpty) -}}
+  {{- fail (printf "target %q matched no rule files; refusing to render an empty manifest because ArgoCD prune would delete every existing ConfigMap. Set allowEmpty=true only when deliberately bootstrapping a target." $target) -}}
+{{- end -}}
+{{- range $path, $_ := $matched }}
   {{- if not (hasSuffix "-tests.yaml" (base $path)) }}
-    {{- $key    := $path | trimPrefix "rules/" | replace "/" "-" }}
-    {{- $team   := index (splitList "/" $path) 1 }}
-    {{- $tenant := $.Values.tenant }}
+    {{- $key  := $path | trimPrefix "rules/" | replace "/" "-" }}
+    {{- $team := index (splitList "/" $path) 1 }}
+    {{- $name := printf "%s-%s" $tenant ($key | trimSuffix ".yaml") }}
+    {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $team) }}
+      {{- fail (printf "team folder must be a DNS label: %s" $path) }}
+    {{- end }}
+    {{- if or (gt (len $name) 253) (gt (len $key) 253) }}
+      {{- fail (printf "generated ConfigMap name or key exceeds 253 bytes: %s" $path) }}
+    {{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ printf "%s-%s" $tenant ($key | trimSuffix ".yaml") }}
+  name: {{ $name }}
   labels:
-    rules: {{ $target }}
-    team: {{ $team }}
-    tenant: {{ $tenant }}
-  {{- if ne $target "prometheus" }}
+    rules: {{ $target | quote }}
+    team: {{ $team | quote }}
+    tenant: {{ $tenant | quote }}
   annotations:
-    k8s-sidecar-target-directory: {{ $tenant }}
+    observability-rules/source-path: {{ $path | quote }}
+  {{- if ne $target "prometheus" }}
+    k8s-sidecar-target-directory: {{ $tenant | quote }}
   {{- end }}
 data:
   {{ $key }}: |-
@@ -182,25 +241,56 @@ data:
 {{- end }}
 ```
 
-Four properties are load-bearing.
+Five properties are load-bearing.
 
 **The data key is the flattened path, not the bare filename.** The sidecar writes
 each ConfigMap key as a file into the ruler's directory, and Mimir treats each
 file as one rule namespace. A bare `http-alerts.yaml` key would let two teams
 collide on one path and **silently overwrite each other in the ruler**, with both
-PRs green and both ConfigMaps present. Flattening makes that impossible and gives
-a 1:1:1 mapping between the git path, the ConfigMap name, and the namespace shown
-in the ruler UI.
+PRs green and both ConfigMaps present. Flattening removes that whole class and
+gives a readable 1:1:1 mapping between the git path, the ConfigMap name, and the
+namespace shown in the ruler UI.
+
+Flattening is not injective on its own: `checkout/latency-alerts.yaml` and
+`checkout-latency-alerts.yaml` in the same team and target both flatten to
+`<team>-<target>-checkout-latency-alerts.yaml`. **The duplicate-key assertion in
+CI stage 5 is the guard**, not the flattening. It is deterministic and complete,
+runs on every PR, and fails with the two offending paths named. This is a
+deliberate trade: appending a path hash would make collisions structurally
+impossible but would put twelve hex characters into every rule namespace name in
+the ruler UI, destroying the readable mapping that is the point of flattening.
+
+**Inputs fail closed, and so does an empty result.** `values.schema.json` and the
+`fail` guards reject an absent or unknown `target`, an unsafe `tenant`, an invalid
+team folder, and generated names over 253 bytes. This matters more than it looks:
+an unknown target makes the glob match nothing, renders an empty manifest, and
+**ArgoCD with `prune: true` then deletes every rule ConfigMap owned by that
+Application.** A one-character typo in a values file would silently remove all
+alerting for a target.
+
+Validating the target value is necessary but not sufficient, because a *valid*
+target that happens to match zero files renders empty too, with exactly the same
+consequence. A folder convention rename, a bad merge, or a mistaken glob would do
+it. So the template also refuses to render an empty manifest at all, unless
+`allowEmpty: true` is passed deliberately when bootstrapping a target that has no
+rules yet. Verified: without the guard, `target=loki` with no loki rules renders
+one byte and reports success.
+
+Label values are quoted so a tenant like `true` or `01` stays a string.
 
 **`hasSuffix "-tests.yaml"`, not `contains "tests"`.** ***REMOVED*** used the latter,
 so a legitimately named file such as `integration-tests-alerts.yaml` would have
 been silently excluded from every ConfigMap and never deployed.
 
 **The tenant is in the object name; the data key is not.** Each tenant has its own
-ruler directory, so data keys need not be unique across tenants, only Kubernetes
-object names must be. When tenants fan out, ConfigMap names gain a prefix and
-multiply while **rule namespace names stay byte-identical**, so the ruler UI,
-`namespace` labels on alerts, and any silences referencing them do not churn.
+ruler directory, so data keys need not be unique across tenants, while Kubernetes
+object names must be unique within the destination namespace. When tenants fan
+out, ConfigMap names change while **data keys and rule namespaces stay
+byte-identical** in the ruler APIs and UI.
+
+Note this does not extend to silences. Alerts do not carry the rule namespace as
+a label (see Section 4), so a silence cannot match on a generated namespace name
+unless a rule declares such a label itself.
 
 **`**` is required for the glob.** Verified against Helm v4.2.3: `*` does not
 cross `/`, `**` does. This is what permits subfolders.
@@ -267,10 +357,14 @@ mostly buys tidiness. **Do not stack both axes**: three environments times fifte
 teams is forty-five tenants, each with its own limits, retention, and datasource.
 Pick one primary axis and express the other as a label.
 
-Cross-environment rules remain possible under tenant-per-env: Mimir's ruler
-supports federation (`ruler.tenant_federation` config, `SourceTenants` on
-`RuleGroupDesc`), so a rule spanning preprod and prod becomes a federated rule
-group rather than an impossibility.
+Cross-environment rules can remain possible under tenant-per-env, but federated
+groups are skipped by default and this is not free. The backend must enable
+**both** `ruler.tenant_federation.enabled` and the cross-tenant query federation
+flag `tenant_federation.enabled`, and the rule group must declare
+`source_tenants: ["staging", "prod"]`. The presence of
+`RuleGroupDesc.SourceTenants` in the Mimir source does not by itself mean
+federated rules work; treat these as backend changes to make only when
+tenant-per-environment is actually implemented.
 
 **Open question, deliberately deferred (see Section 12):** how a team declares
 which environments a rule runs in. Deferring is free precisely because of the
@@ -300,7 +394,6 @@ spec:
       releaseName: observability-rules-mimir
       values: |
         target: mimir
-        tenant: <tenant>
   destination:
     server: <in-cluster>
     namespace: <mimir ruler namespace>
@@ -310,6 +403,13 @@ spec:
 
 The loki and prometheus Applications are identical but for `target` and the
 destination namespace.
+
+**The Applications override only `target`. They must not set `tenant`.**
+`values.yaml`, including any future `tenantOverrides`, is the single source used
+by both rendering and the Phase 2 live validation. An Application that overrode
+the tenant would make CI validate against a different tenant from the one
+receiving the rules, which is precisely the silent-null failure this design keeps
+trying to eliminate.
 
 **Plain Applications, not ApplicationSets.** ***REMOVED*** used cluster generators
 selecting on `platform`/`environment`/`class` cluster-secret labels because it
@@ -381,16 +481,22 @@ One entrypoint, `scripts/check.sh`, running identically on a laptop and in GitHu
 Actions, so a contributor can reproduce a failure without pushing. Five stages,
 cheapest first.
 
-1. **Structure.** Filename regex. CODEOWNERS and folder sets agree in both
-   directions. `owner` label equals team folder. Canonical environment selector
-   form, values from a known list, consistent within an expression.
-   `prometheus/` only under the platform team.
-2. **Contract.** `promruval validate --config-file validation.yaml`, carrying
-   ***REMOVED***'s four rules minus its hand-maintained owner list, which stage 1 now
-   derives from the filesystem.
+1. **Structure.** Filename and directory-segment regexes, and generated
+   name/key length. Files rejected outside `rules/<team>/<target>/**.yaml`;
+   symlinks rejected. CODEOWNERS and folder sets agree in both directions.
+   `owner` label equals team folder. Alert names unique repository-wide.
+   Canonical environment matcher enforced **via the PromQL/LogQL AST, not by
+   grepping YAML**. `prometheus/` only under the configured platform-team folder.
+2. **Contract.** `promruval validate --config-file validation.yaml <paths...>`
+   with explicit non-test file paths, carrying ***REMOVED***'s four rules minus its
+   hand-maintained owner list, which stage 1 now derives from the filesystem.
+   Confirm during implementation whether the installed promruval needs a
+   dialect flag to parse LogQL rules; do not assume the PromQL parser accepts them.
 3. **Syntax.** `promtool check rules` for mimir and prometheus targets,
    `lokitool rules check` for loki.
-4. **Unit tests.** `promtool test rules` over `*-tests.yaml`. **Metrics only.**
+4. **Unit tests.** `promtool test rules` over `*-tests.yaml`, failing if any test
+   file was not executed, so a fixture cannot go stale unnoticed the way
+   ***REMOVED***'s three did. **Metrics only.**
    `lokitool rules` offers list, print, get, delete, load, diff, sync, prepare,
    format and check, but **no unit-test command**, so LogQL alert rules cannot be
    behaviourally tested. This asymmetry goes in the README so nobody assumes log
@@ -413,9 +519,17 @@ exists anywhere in its CI. The convention was built and the runner never wired u
 Stage 4 is that gap closed.
 
 GitHub Actions: one workflow on `pull_request` and `push: main` running
-`scripts/check.sh` with pinned tool versions, set as a required status check.
-CODEOWNERS supplies per-team review. The machine enforces the contract, humans
-review the judgement.
+`scripts/check.sh`, with every third-party action pinned by commit SHA and every
+downloaded tool pinned by version and checksum. This job needs **no secrets and
+no internal network access**, which is what keeps it safe to run against
+PR-controlled code.
+
+**Branch protection is the enforcement, CODEOWNERS is only routing.** Require the
+CI status and at least one CODEOWNER approval, dismiss stale approvals, and block
+force pushes. CODEOWNERS must assign the platform team to `Chart.yaml`,
+`values.yaml`, `values.schema.json`, `templates/`, `validation.yaml`, `scripts/`
+and `.github/`, in addition to per-team rule folders. Without that, a team can
+approve its own change to the very checks that govern it.
 
 **Optional, not day-one:** require a `-tests.yaml` companion for any alert with
 `severity: critical`, targeting the alerts that will page someone without
@@ -428,30 +542,53 @@ A green PR and a green ArgoCD do not prove an alert works.
 | Hop | Failure | Covered by |
 | --- | --- | --- |
 | Rule file authored | syntax, missing labels, wrong owner | CI 1-4 |
-| Rendered to ConfigMap | not globbed, duplicate key overwrite, template corruption | CI 5 |
+| Rendered to ConfigMap | not globbed, duplicate name or key, template corruption | CI 5 |
 | ConfigMap applied | drift, manual edit | ArgoCD `selfHeal` |
-| Sidecar writes file | crashed container, wrong label, wrong annotation | **deadman only** |
-| Ruler loads namespace | poll interval, rule rejected at load | **deadman only** |
-| Rule evaluates to data | metric absent, wrong tenant, env selector mismatch | Phase 2 (Section 11) |
+| Sidecar writes file | crashed container, wrong label, wrong annotation | sidecar health alert; **per-object: not covered** |
+| Ruler loads namespace | poll delay, rule rejected at load, stale content | ruler reload metric; **per-namespace: not covered** |
+| Whole target path dead | sidecar, ruler, or notification path down | external deadman, one per target |
+| Rule evaluates to data | metric absent, wrong tenant, selector mismatch | Phase 2, Mimir target only |
 
-Two hops are covered only by the deadman canary, which is why it is not optional
-decoration. It ships through the identical pipeline, so it shares a fate with
-every other rule, and its heartbeat is observed from outside the cluster. One per
-target, since the paths are independent and any can fail alone.
+### Known gap, accepted deliberately
 
-**Until Phase 2 exists, an alert referencing a metric that does not exist passes
-every gate and simply never fires.** That is the most likely way a team ships a
-useless alert, and no schema validation catches it.
+**A deadman proves only that its own ConfigMap and its target's notification path
+work.** It does not prove that some other ConfigMap was written, that an edit
+replaced the previous content of an existing namespace, or that one namespace
+failed to load while the deadman's namespace stayed healthy. A single object
+silently missing or stale can coexist indefinitely with a green deadman, a green
+ArgoCD, and a green CI run.
+
+Closing that gap properly needs a reconciler that compares the rendered ConfigMap
+set against what the ruler APIs actually report. That is deliberately **not** in
+scope: it is a component to build and operate, and the risk it addresses is a
+partial delivery failure rather than a total one. This is a conscious trade, not
+an oversight, and it should be revisited if partial delivery failures are ever
+observed in practice.
+
+Two cheap partial mitigations are in scope, because they need no new component:
+
+- Alert on sidecar container unavailability per target.
+- Alert on the rulers' own config-reload metrics, including a stale
+  last-successful-reload timestamp.
+
+**Also until Phase 2 exists, an alert referencing a metric that does not exist
+passes every gate and simply never fires**, and Phase 2 covers only the Mimir
+target. Equivalent live validation for Loki and the meta Prometheus is a separate
+follow-up that this spec does not design.
 
 ### Acceptance test
 
 Not "CI is green", but end to end:
 
-1. Merge a deliberately-failing canary alert.
+1. Merge an always-firing test alert routed to a test receiver.
 2. Confirm it appears in the ruler within the poll interval, and fires.
-3. Delete the file; confirm the ConfigMap is pruned, the file removed, the alert resolves.
-4. Scale Mimir's ruler to zero; confirm the Mimir-down alert still fires from the
-   meta Prometheus, and reaches Alertmanager by a path that does not touch Mimir.
+3. Delete the file; confirm the ConfigMap is pruned and the file removed, then
+   confirm the alert resolves, allowing for Alertmanager's resolve timeout rather
+   than expecting an immediate resolved notification.
+4. Scale Mimir's ruler to zero, **first disabling ArgoCD self-heal for that
+   Application or the replica count will be restored under you**, and confirm the
+   Mimir-down alert still fires from the meta Prometheus and reaches Alertmanager
+   by a path that does not touch Mimir.
 
 Step 4's final clause matters: routing meta alerts through anything
 Mimir-dependent quietly restores the circular dependency being removed.
@@ -483,16 +620,59 @@ prometheus:
 typo-catching: it stops a rule that would return a hundred thousand series before
 the ruler evaluates it every interval forever.
 
+This phase covers **`rules/*/mimir/` only.** Loki and meta-Prometheus rules would
+need their own endpoints and LogQL-aware checks, which this spec does not design.
+
+Note these parameters are detection thresholds, not protective limits:
+`expressionCanBeEvaluated` runs the whole expression and only then counts series
+and measures elapsed time. The Mimir endpoint must therefore enforce its own
+per-tenant query timeout, max samples, and concurrency limits **before** CI is
+allowed to call it. A single tenant means one expensive rule has stack-wide blast
+radius.
+
 **Why it is Phase 2:** CI needs a network path to Mimir. GitHub-hosted runners
 cannot reach an internal gateway, so this requires a self-hosted runner or a
 read-only endpoint reachable from Actions. That is an infrastructure decision and
 must not block the other five stages.
 
-**Exemptions** use the alert annotation `disabled_validation_rules: <rule-name>`
-(configurable via `customExcludeAnnotation`) rather than promruval's YAML or
-PromQL comment forms, because an annotation lands in the PR diff where a reviewer
-sees it. Legitimate cases include a service being instrumented in the same PR and
-metrics that only appear during an incident.
+### CI trust boundary
+
+This is the part to get right, because the obvious implementation is a serious
+vulnerability. **Do not run `scripts/check.sh`, or any other PR-controlled code,
+on a runner that can reach Mimir.** Doing so gives anyone who can open a pull
+request arbitrary code execution inside the network.
+
+The static workflow stays as it is: PR-controlled code, no secrets, no internal
+access. The live-validation workflow is separate and must take its workflow
+definition from the protected default branch, must not check out or execute
+PR-controlled scripts, actions or binaries, and should fetch only the candidate
+`rules/*/mimir/**/*.yaml` blobs through the GitHub API before handing them to a
+pinned promruval binary. Do not use `pull_request_target` combined with checking
+out the PR head. Any self-hosted runner must be ephemeral, dedicated, hold no
+cloud-instance credentials, and use a read-only tenant-scoped Mimir credential.
+
+The promruval cache lives in workflow scratch space, is never committed or
+uploaded as an artifact, and is keyed by Mimir URL, tenant, tool version and
+config hash.
+
+### Exemptions
+
+Alerts use the annotation `disabled_validation_rules: <rule-name>` (configurable
+via `customExcludeAnnotation`), because an annotation lands in the PR diff where a
+reviewer sees it. Legitimate cases include a service being instrumented in the
+same PR and metrics that only appear during an incident.
+
+**Recording rules have no annotations field**, so they cannot use that mechanism.
+They use an immediately preceding rule-level comment instead:
+
+```yaml
+# ignore_validations: <validation-rule-name>
+# validation_exemption_reason: <why>
+- record: ...
+```
+
+CI rejects file-level and group-level exemptions, unknown validation names, and
+any exemption lacking a reason comment.
 
 **Run it non-blocking first**, reporting without failing PRs, until the
 false-positive rate on real data is known. Promote to required once quiet.
@@ -511,8 +691,8 @@ mechanically:
 
 - Flat file means all environments, an `<env>/` subfolder means that environment
   only. No new file format, zero ceremony in the common case. A subset such as
-  preprod-and-prod-but-not-dev needs the file in two folders.
-- Filename suffix carries the set (`checkout-alerts.preprod-prod.yaml`). Handles
+  staging-and-prod-but-not-dev needs the file in two folders.
+- Filename suffix carries the set (`checkout-alerts.staging-prod.yaml`). Handles
   subsets without duplication, at the cost of a parsing convention and noisier
   filenames.
 - Always explicit, one env folder per rule. Nothing implicit, but the common
@@ -524,31 +704,100 @@ The canonical selector form in Section 4 is what makes deferring free.
 
 ## 13. Prerequisites (backend, outside this repo)
 
-1. `k8s-sidecar` on the Mimir ruler: `LABEL=rules`, `LABEL_VALUE=mimir`,
-   `FOLDER=/tmp/rules` (**without** the tenant, which now comes from the annotation).
-2. Same on the Loki ruler with `LABEL_VALUE=loki`.
-3. Lower Mimir's `-ruler.poll-interval` from its 10 minute default toward Loki's
-   1 minute, so feedback latency after merge is comparable across targets.
-4. Deploy the meta Prometheus: direct scrape of Mimir and Loki component pods,
-   local TSDB with short retention, `--web.enable-lifecycle`, rules sidecar with
-   `REQ_URL`, and an Alertmanager path independent of Mimir.
-5. For Phase 2 only: a network path from CI to the Mimir query endpoint.
+A sidecar writing to `/tmp/rules` achieves nothing unless the ruler reads that
+exact directory through a volume they both share. That wiring is the prerequisite,
+not the sidecar alone.
+
+### Mimir ruler
+
+1. Configure local rule storage explicitly:
+   ```yaml
+   ruler_storage:
+     backend: local
+     local:
+       directory: /tmp/rules
+   ```
+2. Mount the same writable `emptyDir` at `/tmp/rules` in **both** the ruler and
+   sidecar containers, and confirm the pod security context lets both create,
+   replace and delete tenant directories and files.
+3. `k8s-sidecar` pinned by digest: `METHOD=WATCH`, `LABEL=rules`,
+   `LABEL_VALUE=mimir`, `FOLDER=/tmp/rules` (**without** the tenant, which now
+   comes from the annotation), `NAMESPACE` set to the pod namespace, unique-filename
+   rewriting disabled. Namespace-scoped read-only ConfigMap RBAC.
+4. Lower `-ruler.poll-interval` from the 10 minute default toward Loki's 1 minute,
+   so feedback latency after merge is comparable across targets.
+5. Alert on sidecar unavailability and `cortex_ruler_config_last_reload_successful == 0`.
+
+### Loki ruler
+
+1. Configure local rule storage explicitly:
+   ```yaml
+   ruler:
+     storage:
+       type: local
+       local:
+         directory: /tmp/rules
+   ```
+2. Same shared-volume, permissions, digest-pinning and namespace-scoped RBAC
+   requirements as Mimir, with `LABEL_VALUE=loki`.
+3. Alert on sidecar unavailability and Loki's ruler config-reload metrics.
+
+### Meta Prometheus
+
+1. Direct pod or service-endpoint scrapes of Mimir and Loki components, local TSDB
+   with short retention, and an Alertmanager path that does not traverse Mimir.
+2. Configure the rule path explicitly, matching what the sidecar writes:
+   ```yaml
+   rule_files:
+     - /tmp/rules/*.yaml
+   ```
+3. Shared writable `emptyDir` at `/tmp/rules`, and `--web.enable-lifecycle`.
+4. Sidecar with `LABEL_VALUE=prometheus`, `REQ_URL=http://localhost:9090/-/reload`,
+   `REQ_METHOD=POST`.
+5. Alert on sidecar unavailability, `prometheus_config_last_reload_successful == 0`,
+   and a stale successful-reload timestamp.
+
+### Cross-target
+
+1. Enforce backend per-tenant query time, sample, and concurrency limits before
+   granting repository write access broadly.
+2. Pin Helm, promruval, promtool, lokitool and k8s-sidecar to tested versions or
+   digests and record their checksums. ***REMOVED*** ran sidecar 1.23.1 and 1.24.3
+   while its artifact repo had mirrored 1.25.3; the delete behaviour cited in
+   Appendix A was read from current upstream and should be confirmed against
+   whichever version is actually pinned.
+3. For Phase 2 only: the constrained CI path described in Section 11.
+
+### Suggested ordering
+
+Do not make the meta Prometheus, two backend ruler changes, three ArgoCD
+Applications, the repository itself, and Phase 2 networking one atomic rollout.
+Four separately reviewable workstreams:
+
+1. Backend local rule storage, shared volumes, sidecars, reload alerts.
+2. Repository chart, `scripts/check.sh`, static CI, CODEOWNERS, branch protection, canaries.
+3. ArgoCD Applications and the end-to-end acceptance test.
+4. Meta Prometheus, then Phase 2 live validation once the rest is stable.
 
 ## Appendix A: evidence
 
 Findings from the archived ***REMOVED*** repositories and from upstream source, each
 of which motivated a decision above.
 
+Five rows were wrong in the first draft and were corrected after external review
+re-derived them from the archives. The corrections are noted inline, because a
+spec that cites evidence should show where its evidence was sloppy.
+
 | Finding | Evidence |
 | --- | --- |
-| The `global` rule tier was never used | `rules/*/metrics/global/` contains only `.gitkeep` across 413 commits |
-| Unit tests were never run | 3 `*-tests.yaml` files exist; no `promtool`/`cortextool`/`mimirtool` reference in CI |
+| The `global` rule tier was abandoned, not never used | the current tree holds only `.gitkeep`, but history contains `rules/files/op/metrics/global/alerts.yaml` and a test-team equivalent. **Corrected:** the first draft claimed it was never used across 413 commits |
+| Unit tests were never run | 3 `*-tests.yaml` files exist and no CI job ever invoked a test runner. **Corrected:** two commits did add a `mimirtool` download, so "no reference in CI" was true only of the final state |
 | Test-exclusion bug | template used `contains "tests"`, not a suffix match |
 | Owner allow-list drifted from reality | 18 values hand-maintained in `validation.yaml`, unconnected to folders |
-| Environment selector sprawl | 73 of 79 rule files, 229 selectors, 8 distinct shapes including `!="dev"` |
+| Environment selector sprawl | 73 of 79 rule files, **210** matchers in deployable rules, 8 distinct shapes including `!="dev"`. **Corrected:** the first draft said 229, which counted 19 more occurrences inside test fixtures |
 | Tenant hardcoded and unowned | `/tmp/rules/***REMOVED***` in 4 backend values files; 0 tenant commits in the rules repo |
-| Mimir alerts were self-referential | 10 `Mimir*` alerts evaluated by Mimir's own ruler |
-| `prometheus-query` was not a hedge | its whole config is one `remote_read` at the Mimir gateway |
+| Mimir alerts were self-referential | **60** `Mimir*` rule definitions, 54 unique alert names, evaluated by Mimir's own ruler. **Corrected:** the first draft said 10, a number taken from `head`-truncated grep output and mistaken for a count |
+| `prometheus-query` was not a hedge | its whole config is one `remote_read` at the Mimir gateway. **Corrected:** it was also pinned at `replicas: 0`, so it was already switched off and could not have hedged anything |
 | Helm glob semantics | verified on Helm v4.2.3: `*` does not cross `/`, `**` does |
 | Sidecar tenant override | `FOLDER_ANNOTATION` defaults to `k8s-sidecar-target-directory`; value may be relative |
 | Sidecar delete path | `src/resources.py`, `_process_config_map(..., item_removed=True)` to `remove_file()` |
