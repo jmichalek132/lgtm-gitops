@@ -31,7 +31,7 @@ went wrong, each of which is cited with evidence in Appendix A.
 - Deploying or configuring Mimir, Loki, or ArgoCD themselves
 - Instrumentation and collector configuration
 
-Where this spec depends on a backend change, it is listed in Section 11 as a
+Where this spec depends on a backend change, it is listed in Section 13 as a
 named prerequisite rather than assumed.
 
 ## 2. Goals
@@ -78,8 +78,9 @@ named prerequisite rather than assumed.
 Two structural differences from ***REMOVED***:
 
 **The `regional`/`global` level is gone.** With a single global stack it has no
-meaning. In ***REMOVED*** it was scaffolded everywhere and never used: `metrics/global`
-contained only a `.gitkeep` across 413 commits.
+meaning. ***REMOVED*** scaffolded it everywhere, populated it briefly, then abandoned
+it: its history contains `metrics/global/alerts.yaml`, but the tree it shipped
+with held only a `.gitkeep`.
 
 **The second level names the evaluation target, not the signal.** ***REMOVED*** used
 `metrics/` and `logs/`, which read as signals but always meant destinations
@@ -442,13 +443,14 @@ by the backends already existing.
 ## 8. Meta-monitoring Prometheus
 
 Alerts about Mimir must not be evaluated by Mimir. ***REMOVED***'s
-`rules/op/metrics/regional/mimir-alerts.yaml` held `MimirIngesterUnhealthy`,
-`MimirRequestErrors`, `MimirFrontendQueriesStuck`, `MimirKVStoreFailure` and six
-more, all evaluated by Mimir's own ruler against Mimir's own storage. Its
-`prometheus-query` component was not a hedge: its entire config was a `remote_read`
-pointed at the Mimir gateway, so it went dark exactly when Mimir did. The only
-real coverage was the deadman heartbeat stopping, which can say "metrics alerting
-is dead" but never which component or why.
+`rules/op/metrics/regional/mimir-alerts.yaml` held 60 rule definitions across 54
+unique `Mimir*` alert names, including `MimirIngesterUnhealthy`,
+`MimirRequestErrors`, `MimirFrontendQueriesStuck` and `MimirKVStoreFailure`, all
+evaluated by Mimir's own ruler against Mimir's own storage. Its `prometheus-query`
+component was not a hedge either: its entire config was a `remote_read` pointed at
+the Mimir gateway, and it was pinned at `replicas: 0`, so it was both dependent on
+Mimir and already switched off. The only real coverage was the deadman heartbeat
+stopping, which can say "metrics alerting is dead" but never which component or why.
 
 A dedicated Prometheus scrapes Mimir and Loki component pods directly, stores
 locally with short retention, and evaluates `rules/<team>/prometheus/`.
@@ -514,9 +516,9 @@ template-induced corruption, since `nindent 4` will happily produce broken YAML
 from a source file that validated fine; ***REMOVED*** validated only sources.
 
 ***REMOVED*** shipped three `*-tests.yaml` files and its chart deliberately excluded
-them from ConfigMaps, but no `promtool`, `cortextool` or `mimirtool` reference
-exists anywhere in its CI. The convention was built and the runner never wired up.
-Stage 4 is that gap closed.
+them from ConfigMaps, but no CI job ever invoked a test runner. Two commits went
+as far as downloading `mimirtool` and never called it. The convention was built and
+the runner never wired up. Stage 4 is that gap closed.
 
 GitHub Actions: one workflow on `pull_request` and `push: main` running
 `scripts/check.sh`, with every third-party action pinned by commit SHA and every
