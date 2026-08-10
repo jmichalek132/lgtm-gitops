@@ -8,8 +8,19 @@ Status: Approved, ready for implementation planning
 We run one global Mimir and one global Loki, self-hosted OSS. All environments
 (dev, staging, prod) write to that single stack, separated today only by a
 `deployment_environment` label, into a single tenant. ArgoCD is established and
-the backends are deployed. This spec covers **only the alerting and recording
-rules layer** that sits on top.
+the backends are deployed. This spec covers the **alerting rules, recording rules,
+dashboards and mixins layer** that sits on top.
+
+Those travel by two different delivery paths, which is the single most important
+structural fact in this document:
+
+```
+rules       git -> ArgoCD -> ConfigMap -> sidecar -> Mimir/Loki/Prometheus ruler
+dashboards  git -> Grafana Git Sync -> Grafana          (ArgoCD not involved)
+```
+
+Mixins are not a third path but a source that fans out into both, rendering
+alerts into the first and dashboards into the second.
 
 The design is a rebuild of "***REMOVED***", a working system at a previous employer,
 whose repositories are archived locally at `~/git/old-work` for reference:
@@ -31,17 +42,21 @@ went wrong, each of which is cited with evidence in Appendix A.
 - Deploying or configuring Mimir, Loki, or ArgoCD themselves
 - Instrumentation and collector configuration
 
-Where this spec depends on a backend change, it is listed in Section 13 as a
+Where this spec depends on a backend change, it is listed in Section 15 as a
 named prerequisite rather than assumed.
 
 ## 2. Goals
 
-1. Teams self-serve alerting and recording rules through PRs into their own folder.
+1. Teams self-serve alerting rules, recording rules and dashboards through PRs
+   into their own folder, with one ownership boundary covering all three.
 2. A rule that passes CI and syncs in ArgoCD is very likely loaded by a ruler.
    The residual gap, that per-rule delivery is not verified end to end, is stated
-   explicitly in Section 10 rather than assumed away.
+   explicitly in Section 12 rather than assumed away.
 3. Moving from one tenant to many is a values change, not a migration.
 4. Alerts about the metrics stack keep working when the metrics stack is down.
+5. Upstream mixin coverage for Mimir, Loki, Tempo and Kubernetes is vendored and
+   version-tracked rather than hand-copied, and satisfies the same contract as
+   hand-written content.
 
 ### Non-goals
 
@@ -66,6 +81,18 @@ named prerequisite rather than assumed.
 │       │   └── <service>-alerts-tests.yaml
 │       ├── loki/                   # evaluated by the Loki ruler
 │       └── prometheus/             # evaluated by the meta Prometheus (platform team only)
+├── dashboards/                     # Grafana Git Sync watches this path
+│   └── <team>/
+│       └── <dashboard>.json
+├── mixins/                         # jsonnet sources; render into rules/ and dashboards/
+│   ├── mimir/
+│   │   ├── jsonnetfile.json
+│   │   ├── jsonnetfile.lock.json   # pinned independently; Renovate bumps per mixin
+│   │   └── mixin.libsonnet         # _config overrides for this mixin
+│   ├── loki/
+│   ├── tempo/
+│   └── kubernetes/
+├── Makefile                        # `make mixins` renders all; CI checks for drift
 ├── validation.yaml                 # promruval contract
 ├── scripts/check.sh                # single CI entrypoint, runs identically locally
 ├── examples/
@@ -115,8 +142,11 @@ enforces the consequences:
 
 - Every `rules/<team>/` has a matching CODEOWNERS entry, and every CODEOWNERS
   rules entry has a folder. Neither can drift.
+- A team's `dashboards/<team>/` folder is covered by the same CODEOWNERS entry,
+  so rules and dashboards share one ownership boundary.
 - Every alert's `owner` label equals its containing team folder.
-- Adding a team is a folder plus a CODEOWNERS line. No chart or ArgoCD change.
+- Adding a team is a folder plus a CODEOWNERS line. No chart or ArgoCD change,
+  and no Git Sync change, since it watches `dashboards/` as a whole.
 
 ## 4. The team contract
 
@@ -367,7 +397,7 @@ flag `tenant_federation.enabled`, and the rule group must declare
 federated rules work; treat these as backend changes to make only when
 tenant-per-environment is actually implemented.
 
-**Open question, deliberately deferred (see Section 12):** how a team declares
+**Open question, deliberately deferred (see Section 14):** how a team declares
 which environments a rule runs in. Deferring is free precisely because of the
 canonical selector form in Section 4, which makes the environment set derivable
 from the rules themselves at migration time. The ergonomics can be chosen later
@@ -477,10 +507,114 @@ stuck frontend) belong here. Slow-burn ones (latency trends, cardinality growth)
 are better left in Mimir where the history and richer data live. Duplicating
 everything doubles the pages.
 
-## 9. CI gates
+## 9. Dashboards via Git Sync
+
+`dashboards/<team>/` mirrors `rules/<team>/`, so a single CODEOWNERS entry covers
+a team's rules and dashboards together, and Git Sync's directory-to-folder mapping
+gives a Grafana folder per team without any extra configuration.
+
+Grafana points a `Repository` resource at this repo with path `dashboards/`,
+branch `main`, and:
+
+```yaml
+workflows: ["branch"]
+```
+
+Verified in Grafana source (`apps/provisioning/pkg/apis/provisioning/v0alpha1/types.go:60-69`):
+`WriteWorkflow = "write"` allows direct commits, `BranchWorkflow = "branch"`
+"creates a branch for changes", and an empty list means the repository is
+read-only. Choosing `["branch"]` means a UI edit lands on a branch and returns as
+a pull request, so **the branch protection and CODEOWNERS model in Section 11
+applies to dashboards unchanged**. Authors keep the Grafana UI workflow and no
+machine committer bypasses review.
+
+The `provisioning` feature toggle that enables Git Sync is
+`FeatureStageGeneralAvailability` with `Expression: "true"`, so it is GA and on by
+default, but it carries `RequiresRestart: true`.
+
+**ArgoCD is deliberately not involved.** Grafana pulls; there is no ConfigMap, no
+sidecar, no prune semantics. Two consequences:
+
+- The per-object delivery gap in Section 12 does not apply to dashboards. Their
+  delivery is Grafana's own sync job, which reports success or failure directly.
+- That sync job becomes the only signal, and it is not otherwise on anyone's
+  radar. Alerting on Git Sync job failure is a prerequisite (Section 15), not an
+  optional nicety.
+
+Git Sync provisions **dashboards and folders only**. It has no alert-rule kinds,
+so it cannot absorb the ruler pipeline and the two delivery paths stay separate by
+necessity rather than by choice.
+
+### Dashboard rules
+
+- Every dashboard has a `uid`, unique across the repository.
+- **A `uid` must never change silently.** CI diffs the uid set against the base
+  branch. A changed uid orphans the existing dashboard and breaks every link,
+  annotation and alert reference pointing at it, while looking in the diff like an
+  ordinary edit. Changing one requires an explicit marker in the PR.
+- Dashboard JSON must parse, and filenames follow the same
+  `^[a-z0-9-]+\.json$` restriction as rule files.
+
+## 10. Mixins
+
+**One subfolder per mixin**, each self-contained with its own `jsonnetfile.json`,
+`jsonnetfile.lock.json` and `mixin.libsonnet` holding `_config` overrides:
+`mixins/mimir/`, `mixins/loki/`, `mixins/tempo/`, `mixins/kubernetes/`.
+
+Vendoring per mixin rather than sharing one jsonnetfile at the root is what makes
+version bumps independent: Renovate can raise a PR for the Loki mixin alone,
+without dragging Mimir and Tempo into the same change and the same blast radius.
+It also keeps one mixin's transitive jsonnet dependencies from silently
+constraining another's.
+
+A `make mixins` step renders each into the **existing** trees rather than a
+parallel one:
+
+```
+mixins/<name>/  --render-->  rules/platform/<target>/mixin-<name>-alerts.yaml
+                             dashboards/platform/mixin-<name>/*.json
+```
+
+Because output lands in `rules/` and `dashboards/`, mixin content inherits the
+same delivery, the same CI, and the same ownership as hand-written content. There
+is no second pipeline and no special case in the chart.
+
+**Target routing follows Section 8's argument.** Observability-stack mixins
+(mimir, loki, tempo) render into `rules/platform/prometheus/`, because a mixin
+alerting on Mimir must not be evaluated by Mimir. Everything else
+(kubernetes-mixin and similar) renders into `rules/platform/mimir/`. This rule
+lives in the Makefile, not in someone's memory.
+
+**Contract compliance by injection, not exemption.** The render step injects
+`owner: platform` and configures each mixin's runbook URL through its own
+`_config` where the mixin supports one, injecting a default where it does not.
+Section 4 therefore stays universal with no exempt path, which matters because an
+exemption for `mixins/` is precisely where non-compliant hand-written rules would
+eventually accumulate.
+
+**Alert-name collisions resolve in favour of the mixin.** Mixin alerts keep their
+upstream names, since renaming them breaks the runbooks and dashboards that
+reference them. A colliding hand-written alert gets renamed instead. CI reports
+which is which.
+
+**Generated files are committed and drift-checked.** They have to be: Git Sync
+reads the repository and the Helm chart globs inside the chart directory, so
+neither can consume a CI-only artifact. Each generated file carries a header
+naming its mixin and version, CI re-renders and fails on any diff, and every
+`mixins/<name>/jsonnetfile.lock.json` is committed so Renovate can bump each mixin
+independently, the same way ***REMOVED***'s Renovate bumped mirrored image tags.
+
+**A coupling worth naming:** mixins emit recording rules that their own dashboards
+then query. If the rules half fails to deploy while the dashboards half succeeds,
+panels render empty with no error anywhere. This is another instance of the
+silent-null failure this design keeps chasing, and it appears in the Section 12
+table because the two halves travel by different delivery paths and can fail
+independently.
+
+## 11. CI gates
 
 One entrypoint, `scripts/check.sh`, running identically on a laptop and in GitHub
-Actions, so a contributor can reproduce a failure without pushing. Five stages,
+Actions, so a contributor can reproduce a failure without pushing. Seven stages,
 cheapest first.
 
 1. **Structure.** Filename and directory-segment regexes, and generated
@@ -507,6 +641,14 @@ cheapest first.
    no duplicate ConfigMap names or data keys; every ConfigMap under 1MB; **every
    non-test rule file appears in exactly one rendered ConfigMap**; and the rule
    payloads extracted back out of the ConfigMaps still parse.
+6. **Dashboards.** Every file under `dashboards/` parses as JSON, has a `uid`, and
+   uids are unique repository-wide. **Diff the uid set against the base branch and
+   fail on any uid that changed**, since that orphans the live dashboard while
+   looking like an ordinary edit. Filenames match `^[a-z0-9-]+\.json$`.
+7. **Mixin drift.** Re-run `make mixins` and fail on any diff, so a hand-edit to
+   generated output cannot survive. This is ***REMOVED***'s SLO drift check applied to
+   a much larger generated surface. Also assert that every generated file carries
+   its mixin-and-version header, and that `jsonnetfile.lock.json` is committed.
 
 The last two checks are the ones ***REMOVED*** could not have had. Asserting that
 every file appears in the output is what catches a file silently excluded from the
@@ -537,7 +679,7 @@ approve its own change to the very checks that govern it.
 `severity: critical`, targeting the alerts that will page someone without
 demanding tests for every warning.
 
-## 10. Failure modes and verification
+## 12. Failure modes and verification
 
 A green PR and a green ArgoCD do not prove an alert works.
 
@@ -550,6 +692,18 @@ A green PR and a green ArgoCD do not prove an alert works.
 | Ruler loads namespace | poll delay, rule rejected at load, stale content | ruler reload metric; **per-namespace: not covered** |
 | Whole target path dead | sidecar, ruler, or notification path down | external deadman, one per target |
 | Rule evaluates to data | metric absent, wrong tenant, selector mismatch | Phase 2, Mimir target only |
+| Dashboard reaches Grafana | malformed JSON, Git Sync job failure | Git Sync job status; **alert on it (Section 15)** |
+| Dashboard survives an edit | `uid` changed, orphaning the live dashboard | CI 6, uid diff against base branch |
+| Mixin output matches source | generated file hand-edited, stale render | CI 7, re-render and diff |
+| Mixin rules and dashboards agree | recording rules undeployed while dashboards deployed | **not covered** |
+
+The last row is a genuinely new failure mode introduced by having two delivery
+paths. A mixin's dashboards query recording rules the same mixin emits, but the
+two halves travel separately: rules through ArgoCD and the sidecar, dashboards
+through Git Sync. If the rules half fails while the dashboards half succeeds, the
+panels render empty with no error in Grafana, in ArgoCD, or in CI. Detecting it
+properly needs the reconciler declined below; until then it is a known hazard
+worth mentioning in the runbook for "mixin dashboard is blank".
 
 ### Known gap, accepted deliberately
 
@@ -595,7 +749,7 @@ Not "CI is green", but end to end:
 Step 4's final clause matters: routing meta alerts through anything
 Mimir-dependent quietly restores the circular dependency being removed.
 
-## 11. Phase 2: live validation against Mimir
+## 13. Phase 2: live validation against Mimir
 
 promruval supports three validations requiring a live connection:
 
@@ -684,7 +838,7 @@ false-positive rate on real data is known. Promote to required once quiet.
 `scripts/check.sh` reads the tenant from `values.yaml` and injects the header, so
 there is one source of truth.
 
-## 12. Open questions
+## 14. Open questions
 
 **How a team declares which environments a rule runs in.** Deferred until the
 tenant-per-environment split is actually wanted. Options considered, with the
@@ -704,7 +858,7 @@ mechanically:
 
 The canonical selector form in Section 4 is what makes deferring free.
 
-## 13. Prerequisites (backend, outside this repo)
+## 15. Prerequisites (backend, outside this repo)
 
 A sidecar writing to `/tmp/rules` achieves nothing unless the ruler reads that
 exact directory through a volume they both share. That wiring is the prerequisite,
@@ -759,6 +913,18 @@ not the sidecar alone.
 5. Alert on sidecar unavailability, `prometheus_config_last_reload_successful == 0`,
    and a stale successful-reload timestamp.
 
+### Grafana (dashboards)
+
+1. Run Grafana with the `provisioning` feature toggle. It is GA and enabled by
+   default, but `RequiresRestart: true`, so confirm it is actually active.
+2. Create a `Repository` resource pointing at this repo, path `dashboards/`,
+   branch `main`, `workflows: ["branch"]`, with a GitHub credential scoped to this
+   repository alone.
+3. **Alert on Git Sync job failure.** This is the only delivery signal dashboards
+   have, and nothing else in this design watches it.
+4. Decide how a Grafana-opened branch becomes a PR and who reviews it, so UI edits
+   do not accumulate as abandoned branches.
+
 ### Cross-target
 
 1. Enforce backend per-tenant query time, sample, and concurrency limits before
@@ -768,7 +934,7 @@ not the sidecar alone.
    while its artifact repo had mirrored 1.25.3; the delete behaviour cited in
    Appendix A was read from current upstream and should be confirmed against
    whichever version is actually pinned.
-3. For Phase 2 only: the constrained CI path described in Section 11.
+3. For Phase 2 only: the constrained CI path described in Section 13.
 
 ### Suggested ordering
 
@@ -779,7 +945,14 @@ Four separately reviewable workstreams:
 1. Backend local rule storage, shared volumes, sidecars, reload alerts.
 2. Repository chart, `scripts/check.sh`, static CI, CODEOWNERS, branch protection, canaries.
 3. ArgoCD Applications and the end-to-end acceptance test.
-4. Meta Prometheus, then Phase 2 live validation once the rest is stable.
+4. Dashboards: Git Sync repository, `dashboards/<team>/`, uid checks, sync-failure alert.
+5. Mixins: one subfolder at a time, starting with the one whose alerts you most
+   want (probably mimir), rendering into the trees the earlier stages already
+   deliver. Adding a mixin is then a contained change rather than a new pipeline.
+6. Meta Prometheus, then Phase 2 live validation once the rest is stable.
+
+Stages 4 and 5 are genuinely independent of 1 through 3, since dashboards never
+touch ArgoCD. They can run in parallel with a different pair of hands.
 
 ## Appendix A: evidence
 
@@ -808,6 +981,9 @@ spec that cites evidence should show where its evidence was sloppy.
 | Loki poll interval | `pkg/ruler/base/ruler.go:169`, default 1m |
 | Mimir ruler federation exists | `ruler.tenant_federation` config, `RuleGroupDesc.SourceTenants` |
 | No LogQL unit tests | `lokitool rules` has no test subcommand |
+| Git Sync is GA, not experimental | `provisioning` toggle, `FeatureStageGeneralAvailability`, `Expression: "true"`, `RequiresRestart: true` |
+| Git Sync workflow modes | `types.go:60-69`: `WriteWorkflow = "write"` (direct), `BranchWorkflow = "branch"` (creates a branch); empty list means read-only |
+| Git Sync scope | provisions Dashboard kinds and folders only; no alert-rule kinds, so it cannot replace the ruler pipeline |
 
 Upstream versions inspected: Mimir `2fba38ee3f` (mimir-distributed 6.2.0-weekly.407),
 Loki `1657a04339`, Helm v4.2.3.
