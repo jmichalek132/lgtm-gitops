@@ -306,8 +306,9 @@ groups:
 ```makefile
 .PHONY: check test lint
 
-# Everything CI runs. Identical locally.
-check:
+# Everything CI runs. Identical locally: CI invokes exactly this target and
+# nothing else, so a green laptop run means a green pipeline.
+check: test
 	./scripts/check.sh
 
 # Fast inner loop: chart behaviour plus helper unit tests.
@@ -368,34 +369,69 @@ Append to `tests/chart_test.sh`, before the final `summary` line:
 ```bash
 echo "chart: fail-closed guards"
 
+# --skip-schema-validation is deliberate: values.schema.json rejects these first,
+# so without it we would be testing the schema and never reaching the template
+# guard. Both layers matter, and this asserts the second one.
 assert_fails_with "values.target must be mimir, loki or prometheus" \
-  "invalid target is rejected" \
-  helm template t . --set target=mimr --set tenant=platform
+  "template guard rejects an invalid target" \
+  helm template t . --set target=mimr --set tenant=platform --skip-schema-validation
 
 assert_fails_with "values.tenant must be a DNS label" \
-  "invalid tenant is rejected" \
-  helm template t . --set target=mimir --set tenant=Prod_1
+  "template guard rejects an invalid tenant" \
+  helm template t . --set target=mimir --set tenant=Prod_1 --skip-schema-validation
 
-assert_fails_with "matched no rule files" \
-  "valid target with zero files refuses to render empty" \
-  helm template t . --set target=loki --set tenant=platform
+LONG_TENANT=$(printf 'a%.0s' $(seq 1 64))
+assert_fails_with "values.tenant must be a DNS label of at most 63 bytes" \
+  "template guard rejects an overlong tenant" \
+  helm template t . --set target=mimir --set tenant="$LONG_TENANT" --skip-schema-validation
 
-OUT_EMPTY=$(helm template t . --set target=loki --set tenant=platform --set allowEmpty=true)
+# The emptiness cases use a throwaway chart. Asserting them against the real
+# repository would break the moment a later task adds a loki rule, which is
+# exactly what happens in Task 3.
+EMPTY_CHART=$(mktemp -d "${TMPDIR:-/tmp}/observability-rules-chart.XXXXXX")
+trap 'rm -rf "$EMPTY_CHART"' EXIT
+mkdir -p "$EMPTY_CHART/templates" "$EMPTY_CHART/rules/platform/loki"
+cp Chart.yaml values.yaml values.schema.json "$EMPTY_CHART/"
+cp templates/configmaps.yaml "$EMPTY_CHART/templates/"
+printf '%s\n' 'rule_files: []' 'tests: []' > "$EMPTY_CHART/rules/platform/loki/only-tests.yaml"
+
+assert_fails_with "matched no deployable rule files" \
+  "a target holding only test fixtures refuses to render empty" \
+  helm template t "$EMPTY_CHART" --set target=loki --set tenant=platform
+
+OUT_EMPTY=$(helm template t "$EMPTY_CHART" \
+  --set target=loki --set tenant=platform --set allowEmpty=true)
 if [ -z "$(printf '%s' "$OUT_EMPTY" | tr -d '[:space:]')" ]; then
   pass "allowEmpty=true permits a deliberate empty render"
 else
   fail "allowEmpty=true permits a deliberate empty render" "expected empty output"
 fi
+
+mkdir -p "$EMPTY_CHART/rules/Bad_Team/mimir"
+printf '%s\n' 'groups: []' > "$EMPTY_CHART/rules/Bad_Team/mimir/a.yaml"
+assert_fails_with "team folder must be a DNS label" \
+  "invalid team folder is rejected" \
+  helm template t "$EMPTY_CHART" --set target=mimir --set tenant=platform
+rm -rf "$EMPTY_CHART/rules/Bad_Team"
+
+LONG_SEGMENT=$(printf 'a%.0s' $(seq 1 60))
+LONG_DIR="$EMPTY_CHART/rules/platform/mimir/$LONG_SEGMENT/$LONG_SEGMENT/$LONG_SEGMENT/$LONG_SEGMENT"
+mkdir -p "$LONG_DIR"
+printf '%s\n' 'groups: []' > "$LONG_DIR/a.yaml"
+assert_fails_with "generated ConfigMap name or key exceeds 253 bytes" \
+  "overlong generated data key is rejected" \
+  helm template t "$EMPTY_CHART" --set target=mimir --set tenant=platform
+rm -rf "$EMPTY_CHART/rules/platform/mimir"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `./tests/chart_test.sh`
-Expected: the four new assertions FAIL. The invalid-target case renders empty and succeeds instead of erroring, which is precisely the defect.
+Expected: the seven new guard assertions FAIL. In particular the only-fixtures case renders empty and *succeeds*, which is precisely the defect: the glob counts test fixtures before the loop skips them.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Replace the first two lines of `templates/configmaps.yaml` and add the glob guard, so the file begins:
+Replace `templates/configmaps.yaml` in full:
 
 ```gotemplate
 {{- $target := required "values.target is required" .Values.target -}}
@@ -403,32 +439,62 @@ Replace the first two lines of `templates/configmaps.yaml` and add the glob guar
   {{- fail (printf "values.target must be mimir, loki or prometheus; got %q" $target) -}}
 {{- end -}}
 {{- $tenant := required "values.tenant is required" .Values.tenant -}}
-{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $tenant) -}}
-  {{- fail (printf "values.tenant must be a DNS label; got %q" $tenant) -}}
+{{- if or (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $tenant)) (gt (len $tenant) 63) -}}
+  {{- fail (printf "values.tenant must be a DNS label of at most 63 bytes; got %q" $tenant) -}}
 {{- end -}}
 {{- $matched := .Files.Glob (printf "rules/*/%s/**.yaml" $target) -}}
-{{- if and (eq (len $matched) 0) (not .Values.allowEmpty) -}}
-  {{- fail (printf "target %q matched no rule files; refusing to render an empty manifest because ArgoCD prune would delete every existing ConfigMap. Set allowEmpty=true only when deliberately bootstrapping a target." $target) -}}
+{{- $deployable := list -}}
+{{- range $path, $_ := $matched -}}
+  {{- if not (hasSuffix "-tests.yaml" (base $path)) -}}
+    {{- $deployable = append $deployable $path -}}
+  {{- end -}}
 {{- end -}}
-{{- range $path, $_ := $matched }}
-  {{- if not (hasSuffix "-tests.yaml" (base $path)) }}
+{{- if and (eq (len $deployable) 0) (not .Values.allowEmpty) -}}
+  {{- fail (printf "target %q matched no deployable rule files; refusing to render an empty manifest because ArgoCD prune would delete every existing ConfigMap. Set allowEmpty=true only when deliberately bootstrapping a target." $target) -}}
+{{- end -}}
+{{- range $path := $deployable }}
     {{- $key  := $path | trimPrefix "rules/" | replace "/" "-" }}
     {{- $team := index (splitList "/" $path) 1 }}
     {{- $name := printf "%s-%s" $tenant ($key | trimSuffix ".yaml") }}
-    {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $team) }}
-      {{- fail (printf "team folder must be a DNS label: %s" $path) }}
+    {{- if or (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $team)) (gt (len $team) 63) }}
+      {{- fail (printf "team folder must be a DNS label of at most 63 bytes: %s" $path) }}
     {{- end }}
     {{- if or (gt (len $name) 253) (gt (len $key) 253) }}
       {{- fail (printf "generated ConfigMap name or key exceeds 253 bytes: %s" $path) }}
     {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    rules: {{ $target | quote }}
+    team: {{ $team | quote }}
+    tenant: {{ $tenant | quote }}
+  annotations:
+    observability-rules/source-path: {{ $path | quote }}
+  {{- if ne $target "prometheus" }}
+    k8s-sidecar-target-directory: {{ $tenant | quote }}
+  {{- end }}
+data:
+  {{ $key }}: |-
+    {{- $.Files.Get $path | nindent 4 }}
+{{- end }}
 ```
 
-Leave everything from `---` onward exactly as Task 1 wrote it.
+**Why the `$deployable` list and not `len $matched`:** the glob counts `*-tests.yaml`
+fixtures, which the loop then skips. A target holding only fixtures would pass the
+emptiness guard and still render nothing, which is the exact empty-render-then-prune
+disaster the guard exists to prevent. Verified: a `rules/platform/loki/` containing
+only `only-tests.yaml` gives `len $matched` of 1 and renders zero documents.
+
+Note also that `{{- range $path := $deployable }}` binds `$path` to the **element**,
+not the index, because `$deployable` is a list rather than the map `Files.Glob` returns.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./tests/chart_test.sh`
-Expected: `13 passed, 0 failed`
+Expected: `16 passed, 0 failed`
 
 - [ ] **Step 5: Commit**
 
@@ -565,7 +631,7 @@ tests:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./tests/chart_test.sh`
-Expected: `19 passed, 0 failed`
+Expected: `22 passed, 0 failed`
 
 - [ ] **Step 5: Commit**
 
@@ -649,6 +715,12 @@ def test_layout_rejects_generated_name_over_253_bytes(tmp_path):
     assert any("253" in f for f in findings)
 
 
+def test_layout_rejects_yml_extension(tmp_path):
+    write(tmp_path, "rules/payments/mimir/checkout-alerts.yml")
+    findings = rulecheck.check_layout(tmp_path)
+    assert any(".yaml" in f for f in findings)
+
+
 def test_layout_rejects_a_symlink(tmp_path):
     real = write(tmp_path, "rules/payments/mimir/real-alerts.yaml")
     link = tmp_path / "rules" / "payments" / "mimir" / "link-alerts.yaml"
@@ -701,11 +773,21 @@ MAX_NAME_BYTES = 253
 MAX_SEGMENT_BYTES = 63
 
 
-def rule_files(root: Path) -> list[Path]:
+def rule_entries(root: Path) -> list[Path]:
+    """Every file under rules/, including ones with the wrong extension.
+
+    check_layout rejects non-.yaml entries explicitly. Filtering them out here
+    instead would let a `.yml` file sit in the repo being silently ignored by
+    every check and never deployed, which is indistinguishable from working.
+    """
     rules_dir = root / "rules"
     if not rules_dir.is_dir():
         return []
-    return sorted(p for p in rules_dir.rglob("*.yaml") if p.is_file() or p.is_symlink())
+    return sorted(p for p in rules_dir.rglob("*") if p.is_file() or p.is_symlink())
+
+
+def rule_files(root: Path) -> list[Path]:
+    return [p for p in rule_entries(root) if p.suffix == ".yaml"]
 
 
 def flattened_key(root: Path, path: Path) -> str:
@@ -715,12 +797,16 @@ def flattened_key(root: Path, path: Path) -> str:
 
 def check_layout(root: Path) -> list[str]:
     findings: list[str] = []
-    for path in rule_files(root):
+    for path in rule_entries(root):
         rel = path.relative_to(root)
         parts = path.relative_to(root / "rules").parts
 
         if path.is_symlink():
             findings.append(f"{rel}: symlink; rule files must be regular files")
+            continue
+
+        if path.suffix != ".yaml":
+            findings.append(f"{rel}: every file under rules/ must end in .yaml")
             continue
 
         if len(parts) < 3:
@@ -800,7 +886,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python3 -m pytest tests/test_rulecheck.py -q`
-Expected: `8 passed`
+Expected: `9 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -913,6 +999,38 @@ def test_contract_rejects_duplicate_alert_names_across_teams(tmp_path):
     assert any("SharedName" in f and "unique" in f for f in findings)
 
 
+def test_contract_rejects_duplicate_alert_names_within_one_file(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: SameName
+        expr: vector(1)
+        labels: {severity: warning, owner: payments}
+        annotations: {summary: One., runbook_url: https://runbooks.internal/x}
+      - alert: SameName
+        expr: vector(2)
+        labels: {severity: warning, owner: payments}
+        annotations: {summary: Two., runbook_url: https://runbooks.internal/x}
+""")
+    findings = rulecheck.check_contract(tmp_path)
+    assert any("SameName" in f and "unique" in f for f in findings)
+
+
+def test_contract_survives_malformed_labels(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: PaymentsA
+        expr: vector(1)
+        labels: "not-a-mapping"
+        annotations: {summary: S., runbook_url: https://runbooks.internal/x}
+""")
+    findings = rulecheck.check_contract(tmp_path)  # must not raise
+    assert any("severity" in f for f in findings)
+
+
 def test_contract_ignores_recording_rules(tmp_path):
     write(tmp_path, "rules/payments/mimir/a-rules.yaml", """\
 groups:
@@ -950,8 +1068,8 @@ def load_groups(path: Path) -> tuple[list[dict], str | None]:
     """Return (groups, error). Malformed YAML yields ([], message)."""
     try:
         doc = yaml.safe_load(path.read_text()) or {}
-    except yaml.YAMLError as exc:
-        return [], f"unparseable YAML: {exc}"
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return [], f"unreadable or unparseable YAML: {exc}"
     if not isinstance(doc, dict):
         return [], "expected a mapping at the document root"
     groups = doc.get("groups") or []
@@ -993,8 +1111,12 @@ def check_contract(root: Path) -> list[str]:
         parts = path.relative_to(root / "rules").parts
         team = parts[0] if parts else "?"
 
-        labels = alert.get("labels") or {}
-        annotations = alert.get("annotations") or {}
+        # A rule whose labels/annotations are a string or list is malformed, but
+        # it must produce a finding rather than an AttributeError traceback.
+        labels = alert.get("labels")
+        labels = labels if isinstance(labels, dict) else {}
+        annotations = alert.get("annotations")
+        annotations = annotations if isinstance(annotations, dict) else {}
 
         severity = labels.get("severity")
         if severity not in SEVERITIES:
@@ -1018,14 +1140,16 @@ def check_contract(root: Path) -> list[str]:
                 f"{rel}: alert {name}: needs one of {', '.join(URL_ANNOTATIONS)}"
             )
 
-        if name in seen_names and seen_names[name] != path:
+        # No `!= path` guard: two alerts sharing a name inside ONE file are just
+        # as indistinguishable to Alertmanager as two in different files.
+        if name in seen_names:
             findings.append(
                 f"{rel}: alert name '{name}' is not unique; also defined in "
                 f"{seen_names[name].relative_to(root)}. Alerts carry no namespace label, "
                 f"so duplicates are indistinguishable to Alertmanager."
             )
         else:
-            seen_names.setdefault(name, path)
+            seen_names[name] = path
 
     return findings
 ```
@@ -1042,7 +1166,7 @@ CHECKS = {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python3 -m pytest tests/test_rulecheck.py -q`
-Expected: `17 passed`
+Expected: `20 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -1151,6 +1275,28 @@ def test_envmatcher_rejects_inconsistent_occurrences(tmp_path):
     assert any("identical" in f for f in findings)
 
 
+def test_envmatcher_rejects_single_quoted_matcher(tmp_path):
+    # PromQL accepts single quotes, so this is valid but non-canonical. If it
+    # slipped through, the environment set would stop being derivable.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule("up{deployment_environment='prod'} == 0"))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_backtick_matcher(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule("up{deployment_environment=`prod`} == 0"))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_ignores_a_longer_label_with_the_same_suffix(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{my_deployment_environment="prod"} == 0'))
+    assert rulecheck.check_env_matchers(tmp_path) == []
+
+
 def test_envmatcher_ignores_matchers_in_annotations(tmp_path):
     write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
 groups:
@@ -1177,9 +1323,21 @@ Add to `scripts/rulecheck.py` before `CHECKS`:
 
 ```python
 # Any appearance of the label, in any matcher form, so non-canonical usage is
-# caught rather than skipped.
-ENV_ANY_RE = re.compile(r'deployment_environment\s*(?:=~|!~|=|!=)\s*"[^"]*"')
-# The one permitted form. Note the absence of \s*: whitespace is rejected.
+# caught rather than skipped. Three details are load-bearing:
+#
+#   (?<![a-zA-Z0-9_])   word boundary, so my_deployment_environment is not matched
+#   "..." | '...' | `...`  PromQL accepts single quotes and backticks as string
+#                       delimiters, verified with promtool. Matching only double
+#                       quotes would let deployment_environment='prod' bypass the
+#                       contract silently, the worst possible failure for a check
+#                       whose entire purpose is making the environment set derivable.
+#   (?:=~|!~|=|!=)      every operator, so non-canonical ones are reported, not skipped
+ENV_ANY_RE = re.compile(
+    r"""(?<![a-zA-Z0-9_])deployment_environment\s*(?:=~|!~|=|!=)\s*"""
+    r"""(?:"[^"]*"|'[^']*'|`[^`]*`)"""
+)
+# The one permitted form. No \s*, double quotes only: whitespace and alternative
+# delimiters fail this by construction and are reported as non-canonical.
 ENV_CANONICAL_RE = re.compile(r'deployment_environment=~"([a-z|]+)"')
 
 
@@ -1210,7 +1368,8 @@ def check_env_matchers(root: Path) -> list[str]:
     findings: list[str] = []
     for path, name, expr in iter_expressions(root):
         rel = path.relative_to(root)
-        occurrences = ENV_ANY_RE.findall(expr)
+        # finditer, not findall: the pattern has no capture group, so we want the
+        # whole matched text of each occurrence in order to compare them literally.
         raw = [m.group(0) for m in ENV_ANY_RE.finditer(expr)]
         if not raw:
             continue
@@ -1267,7 +1426,7 @@ CHECKS = {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python3 -m pytest tests/test_rulecheck.py -q`
-Expected: `28 passed`
+Expected: `34 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -1461,7 +1620,7 @@ Create `.github/CODEOWNERS`:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python3 -m pytest tests/test_rulecheck.py -q && python3 scripts/rulecheck.py .`
-Expected: `32 passed`, then `[layout] ok` / `[contract] ok` / `[envmatcher] ok` / `[codeowners] ok`
+Expected: `38 passed`, then `[layout] ok` / `[contract] ok` / `[envmatcher] ok` / `[codeowners] ok`
 
 - [ ] **Step 5: Commit**
 
@@ -1698,7 +1857,7 @@ Add the corresponding CODEOWNERS line is already covered by `/dashboards/platfor
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python3 -m pytest tests/test_rulecheck.py -q && python3 scripts/rulecheck.py .`
-Expected: `38 passed`, then all five checks report `ok`
+Expected: `44 passed`, then all five checks report `ok`
 
 - [ ] **Step 5: Commit**
 
@@ -1800,9 +1959,11 @@ require() {
 stage "1-2. structure, contract, environment matchers, CODEOWNERS, dashboards"
 require python3 && run python3 scripts/rulecheck.py .
 
-# macOS ships bash 3.2, which has no `mapfile`. These helpers keep the script
-# working with the system bash so `make check` behaves the same everywhere.
-collect() {  # collect <varname-unused> ; reads NUL-delimited paths into FILES
+# macOS ships bash 3.2, which has no `mapfile`. This keeps the script working
+# with the system bash so `make check` behaves identically everywhere.
+# Reads NUL-delimited paths from stdin into the global array FILES.
+# Verified: both `find -print0` and `sort -z` work on BSD and GNU userland.
+collect() {
   FILES=()
   while IFS= read -r -d '' f; do FILES+=("$f"); done
 }
@@ -1810,10 +1971,17 @@ collect() {  # collect <varname-unused> ; reads NUL-delimited paths into FILES
 stage "3. contract (promruval)"
 if require promruval; then
   # promruval needs explicit paths; fixtures are not rule files.
-  collect < <(find rules -name '*.yaml' ! -name '*-tests.yaml' -print0 | sort -z)
-  if [ "${#FILES[@]}" -gt 0 ]; then
-    run promruval validate --config-file=./validation.yaml "${FILES[@]}"
-  fi
+  # Split by dialect. promruval parses PromQL by default; --support-loki is
+  # required for LogQL rules and --support-mimir for Mimir-flavoured ones.
+  # Verified against the promruval README.
+  collect < <(find rules \( -path 'rules/*/mimir/*' -o -path 'rules/*/prometheus/*' \) \
+    -name '*.yaml' ! -name '*-tests.yaml' -print0 | sort -z)
+  [ "${#FILES[@]}" -gt 0 ] && \
+    run promruval validate --config-file=./validation.yaml --support-mimir "${FILES[@]}"
+
+  collect < <(find rules -path 'rules/*/loki/*' -name '*.yaml' -print0 | sort -z)
+  [ "${#FILES[@]}" -gt 0 ] && \
+    run promruval validate --config-file=./validation.yaml --support-loki "${FILES[@]}"
 fi
 
 stage "4. syntax (promtool, lokitool)"
@@ -1822,11 +1990,14 @@ if require promtool; then
     -name '*.yaml' ! -name '*-tests.yaml' -print0 | sort -z)
   [ "${#FILES[@]}" -gt 0 ] && run promtool check rules "${FILES[@]}"
 fi
-if have lokitool; then
+# lokitool is REQUIRED, not optional. Making it optional meant CI silently
+# skipped every LogQL syntax check, since it was never installed there.
+# Set ALLOW_MISSING_LOKITOOL=1 for a local run without it, never in CI.
+if [ "${ALLOW_MISSING_LOKITOOL:-0}" = "1" ] && ! have lokitool; then
+  printf 'WARNING: lokitool missing, LogQL syntax NOT checked (local override)\n' >&2
+elif require lokitool; then
   collect < <(find rules -path 'rules/*/loki/*' -name '*.yaml' -print0 | sort -z)
   [ "${#FILES[@]}" -gt 0 ] && run lokitool rules check "${FILES[@]}"
-else
-  printf 'lokitool not installed; skipping LogQL syntax check\n' >&2
 fi
 
 stage "5. unit tests (promtool test rules)"
@@ -1987,6 +2158,7 @@ git commit -m "feat: check.sh orchestrator with render assertions over templated
 
 **Files:**
 - Create: `.github/workflows/ci.yaml`, `README.md`, `docs/branch-protection.md`
+- Create: `tools/checksums.txt`
 - Create: `examples/alerts.yaml`, `examples/dashboard.json`
 
 **Interfaces:**
@@ -2027,6 +2199,7 @@ env:
   HELM_VERSION: "v3.16.3"
   PROMTOOL_VERSION: "3.1.0"
   PROMRUVAL_VERSION: "3.2.0"
+  LOKITOOL_VERSION: "3.3.2"
 
 jobs:
   check:
@@ -2034,7 +2207,9 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 0  # uid-change detection needs the base commit
+          fetch-depth: 0             # uid-change detection needs the base commit
+          persist-credentials: false # this job executes PR-controlled code, so it
+                                     # must not leave a usable token in .git/config
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
@@ -2046,28 +2221,57 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
 
-      - name: Install promtool
+      # Every download is checksum-verified. Pinning a version proves which URL
+      # was requested, not what arrived. Generate tools/checksums.txt once by
+      # downloading each artifact and recording `sha256sum <file>`; CI then fails
+      # if any of them ever changes underneath the pin.
+      - name: Install pinned tools
         run: |
-          curl -sSL -o prom.tar.gz \
+          set -euo pipefail
+          curl -sSfL --retry 3 -o prometheus.tar.gz \
             "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-amd64.tar.gz"
-          tar -xzf prom.tar.gz
-          sudo install "prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
-
-      - name: Install promruval
-        run: |
-          curl -sSL -o promruval.tar.gz \
+          curl -sSfL --retry 3 -o promruval.tar.gz \
             "https://github.com/fusakla/promruval/releases/download/v${PROMRUVAL_VERSION}/promruval_${PROMRUVAL_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL --retry 3 -o lokitool.zip \
+            "https://github.com/grafana/loki/releases/download/v${LOKITOOL_VERSION}/lokitool-linux-amd64.zip"
+          sha256sum --check --strict tools/checksums.txt
+          tar -xzf prometheus.tar.gz
+          sudo install "prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
           tar -xzf promruval.tar.gz
           sudo install promruval /usr/local/bin/promruval
+          unzip -q lokitool.zip
+          sudo install lokitool-linux-amd64 /usr/local/bin/lokitool
 
-      - name: Unit tests
-        run: python3 -m pytest tests/ -q
-
-      - name: Full check
+      # One command, and the same one a contributor runs. `make check` depends on
+      # `test`, so pytest runs here too rather than as a separate step that could
+      # drift away from the local experience.
+      - name: make check
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
         run: make check
 ```
+
+Create `tools/checksums.txt`. Generate it once, on the machine you trust, rather than copying values from anywhere:
+
+```bash
+mkdir -p tools
+PROMTOOL_VERSION=3.1.0
+PROMRUVAL_VERSION=3.2.0
+LOKITOOL_VERSION=3.3.2
+curl -sSfL -o prometheus.tar.gz \
+  "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-amd64.tar.gz"
+curl -sSfL -o promruval.tar.gz \
+  "https://github.com/fusakla/promruval/releases/download/v${PROMRUVAL_VERSION}/promruval_${PROMRUVAL_VERSION}_linux_amd64.tar.gz"
+curl -sSfL -o lokitool.zip \
+  "https://github.com/grafana/loki/releases/download/v${LOKITOOL_VERSION}/lokitool-linux-amd64.zip"
+sha256sum prometheus.tar.gz promruval.tar.gz lokitool.zip > tools/checksums.txt
+rm -f prometheus.tar.gz promruval.tar.gz lokitool.zip
+cat tools/checksums.txt
+```
+
+The result is three lines of `<sha256>  <filename>`. When a tool version changes,
+regenerate the file in the same commit; CI fails loudly if the artifact behind a
+pinned version ever changes, which a version pin alone cannot detect.
 
 Create `docs/branch-protection.md`:
 
