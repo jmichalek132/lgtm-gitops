@@ -1,0 +1,32 @@
+validationRules:
+  - name: check-alert-summary
+    scope: Alert
+    validations:
+      - type: hasAnyOfAnnotations
+        params:
+          annotations: ["summary", "message", "description"]
+
+  - name: check-severity-label
+    scope: Alert
+    validations:
+      - type: hasLabels
+        params:
+          labels: ["severity"]
+      - type: labelHasAllowedValue
+        params:
+          label: "severity"
+          allowedValues: ["info", "warning", "error", "critical"]
+
+  - name: check-owner-label
+    scope: Alert
+    validations:
+      - type: hasLabels
+        params:
+          labels: ["owner"]
+
+  - name: check-has-one-url
+    scope: Alert
+    validations:
+      - type: hasAnyOfAnnotations
+        params:
+          annotations: ["runbook_url", "dashboard_url"]
