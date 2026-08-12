@@ -331,17 +331,19 @@ def team_folders(root: Path) -> set[str]:
     return teams
 
 
-def codeowners_entries(root: Path) -> tuple[set[str], dict[str, list[str]]]:
-    """Return (team names claimed under rules/ or dashboards/, pattern -> owners list).
+def codeowners_entries(root: Path) -> tuple[set[str], list[tuple[str, list[str]]]]:
+    """Return (team names claimed under rules/ or dashboards/, ordered entries).
 
-    For each pattern, the owners list contains all handles on that line.
-    If a pattern appears multiple times, last occurrence wins (GitHub semantics).
+    Entries are (pattern, owners) in FILE ORDER, duplicates included. Order is the
+    whole point: GitHub resolves ownership by last matching pattern, so collapsing
+    the file into a pattern -> owners mapping throws away the only information that
+    decides who actually owns a path.
     """
     path = root / ".github" / "CODEOWNERS"
     teams: set[str] = set()
-    pattern_to_owners: dict[str, list[str]] = {}
+    entries: list[tuple[str, list[str]]] = []
     if not path.is_file():
-        return teams, pattern_to_owners
+        return teams, entries
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -351,13 +353,122 @@ def codeowners_entries(root: Path) -> tuple[set[str], dict[str, list[str]]]:
             continue
         pattern = parts[0]
         owners = parts[1:]  # All tokens after the pattern are owner handles
-        pattern_to_owners[pattern] = owners  # Last occurrence wins
+        entries.append((pattern, owners))
         for parent in ("/rules/", "/dashboards/"):
             if pattern.startswith(parent):
                 remainder = pattern[len(parent):].strip("/")
                 if remainder:
                     teams.add(remainder.split("/")[0])
-    return teams, pattern_to_owners
+    return teams, entries
+
+
+# CODEOWNERS is evaluated as a restricted, fully anchored dialect. Anything
+# outside it is REJECTED rather than guessed at, because a pattern this checker
+# mis-evaluates is worse than one it refuses: it would report ownership the
+# repository does not actually have.
+#
+# Supported:
+#   *              the bare default-owner pattern, matching every path
+#   /a/b/          anchored directory, matching everything beneath it
+#   /a/b.txt       anchored path, matching exactly that path
+#   *              inside an anchored pattern, matching within one segment
+#   **             inside an anchored pattern, crossing / freely
+#
+# Rejected: unanchored patterns (gitignore lets them match at any depth, and
+# that depth rule is subtle enough that implementing it from memory would be a
+# guess), character classes, ?, ! negation and backslash escapes.
+CODEOWNERS_UNSUPPORTED_CHARS = set("[]?!\\")
+CODEOWNERS_PROBE = "__codeowners_probe__"
+
+
+def codeowners_pattern_regex(pattern: str) -> re.Pattern[str] | None:
+    """Compile a CODEOWNERS pattern to a whole-path regex, or None if unsupported."""
+    if pattern == "*":
+        return re.compile(r".*")
+    if not pattern.startswith("/"):
+        return None
+    if CODEOWNERS_UNSUPPORTED_CHARS & set(pattern):
+        return None
+
+    body = pattern[1:]
+    if not body:
+        return None
+
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        if body.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif body[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        else:
+            out.append(re.escape(body[i]))
+            i += 1
+    translated = "".join(out)
+
+    # A trailing slash marks a directory: it owns everything beneath, not itself.
+    if body.endswith("/"):
+        return re.compile(rf"^{translated}.+$")
+    return re.compile(rf"^{translated}$")
+
+
+def codeowners_pattern_witness(pattern: str) -> str | None:
+    """A concrete path the pattern matches, used to probe patterns for paths that
+    do not exist yet. A CODEOWNERS line takes effect the moment someone adds the
+    file it names, so the line itself is evidence and must be evaluated now."""
+    if pattern == "*" or not pattern.startswith("/"):
+        return None
+    witness = pattern[1:].replace("**", CODEOWNERS_PROBE).replace("*", CODEOWNERS_PROBE)
+    if witness.endswith("/"):
+        witness += CODEOWNERS_PROBE
+    return witness or None
+
+
+# Directories whose contents are build or tool droppings rather than repository
+# content. Walking them would probe paths GitHub never sees.
+UNTRACKED_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules"}
+
+
+def _files_under(root: Path, rel_dir: str) -> list[str]:
+    base = root / rel_dir
+    if not base.is_dir():
+        return []
+    found: list[str] = []
+    for path in base.rglob("*"):
+        if any(part in UNTRACKED_DIRS for part in path.relative_to(root).parts):
+            continue
+        if path.is_file() or path.is_symlink():
+            found.append(str(path.relative_to(root)))
+    return sorted(found)
+
+
+def governed_probe_paths(root: Path, entry: str, patterns: list[str]) -> list[str]:
+    """Concrete repository paths that must resolve to the platform team for `entry`.
+
+    Three sources, because each covers a hole the others leave:
+      - every file that exists under the entry today
+      - a synthetic path, so an empty or future directory is still evaluated
+      - the witness path of every CODEOWNERS pattern that lands inside the entry,
+        so a line naming a not-yet-created file cannot lie in wait
+    """
+    if entry.endswith("/"):
+        rel_dir = entry.strip("/")
+        probes = set(_files_under(root, rel_dir))
+        probes.add(f"{rel_dir}/{CODEOWNERS_PROBE}")
+        prefix = f"{rel_dir}/"
+    else:
+        rel_path = entry.lstrip("/")
+        probes = {rel_path}
+        prefix = None
+
+    for pattern in patterns:
+        witness = codeowners_pattern_witness(pattern)
+        if witness and prefix and witness.startswith(prefix):
+            probes.add(witness)
+
+    return sorted(probes)
 
 
 def check_codeowners(root: Path) -> list[str]:
@@ -365,7 +476,7 @@ def check_codeowners(root: Path) -> list[str]:
     if not (root / ".github" / "CODEOWNERS").is_file():
         return [".github/CODEOWNERS is missing"]
 
-    owned_teams, pattern_to_owners = codeowners_entries(root)
+    owned_teams, entries = codeowners_entries(root)
     actual_teams = team_folders(root)
 
     for team in sorted(actual_teams - owned_teams):
@@ -379,18 +490,44 @@ def check_codeowners(root: Path) -> list[str]:
             f"CODEOWNERS claims team '{team}' but no rules/ or dashboards/ folder exists"
         )
 
-    for required in PLATFORM_OWNED_PATHS:
-        owners = pattern_to_owners.get(required, [])
-        if not owners:
+    compiled: list[tuple[str, list[str], re.Pattern[str]]] = []
+    for pattern, owners in entries:
+        regex = codeowners_pattern_regex(pattern)
+        if regex is None:
             findings.append(
-                f"CODEOWNERS must assign the platform team to '{required}', "
-                f"otherwise a team can approve changes to the checks that govern it"
+                f"CODEOWNERS pattern '{pattern}' cannot be evaluated by this check. "
+                f"Anchor it with a leading '/' and use only literal segments, '*' and '**'; "
+                f"character classes, '?', '!' and backslash escapes are not supported. "
+                f"A pattern the ownership check cannot evaluate must not be assumed safe."
             )
-        elif PLATFORM_OWNER not in owners:
-            findings.append(
-                f"CODEOWNERS assigns '{required}' to {owners} but the platform team must own it; "
-                f"otherwise a team can approve changes to the checks that govern it"
-            )
+            continue
+        compiled.append((pattern, owners, regex))
+
+    patterns = [pattern for pattern, _ in entries]
+    for entry in PLATFORM_OWNED_PATHS:
+        for probe in governed_probe_paths(root, entry, patterns):
+            # GitHub resolves ownership by the LAST matching pattern, so a more
+            # specific line later in the file overrides an earlier directory entry.
+            winner = None
+            for pattern, owners, regex in compiled:
+                if regex.match(probe):
+                    winner = (pattern, owners)
+            if winner is None:
+                findings.append(
+                    f"CODEOWNERS must assign the platform team to '{entry}': no pattern "
+                    f"matches '{probe}', so nobody owns it and anyone can approve a change "
+                    f"to the checks that govern them"
+                )
+                continue
+            pattern, owners = winner
+            if PLATFORM_OWNER not in owners:
+                findings.append(
+                    f"CODEOWNERS gives '{probe}' (governed by '{entry}') to "
+                    f"{owners or 'nobody'} through pattern '{pattern}', which is the last "
+                    f"pattern matching it and therefore the one GitHub applies. "
+                    f"{PLATFORM_OWNER} must own it, otherwise a team can approve changes "
+                    f"to the checks that govern it"
+                )
 
     return findings
 

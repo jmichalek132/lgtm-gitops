@@ -390,6 +390,129 @@ def test_codeowners_rejects_a_governing_path_reassigned_to_another_team(tmp_path
     assert any("/scripts/" in f for f in findings)
 
 
+def codeowners(tmp_path, body: str) -> None:
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(body)
+
+
+def governed_repo(tmp_path) -> None:
+    """A minimal repo holding one real file under each governed directory."""
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    write(tmp_path, "dashboards/payments/overview.json", "{}")
+    write(tmp_path, "scripts/rulecheck.py", "# helper\n")
+    write(tmp_path, "templates/configmaps.yaml", "# template\n")
+    write(tmp_path, "tests/test_rulecheck.py", "# tests\n")
+    write(tmp_path, "tools/checksums.txt", "abc  file\n")
+    write(tmp_path, "Chart.yaml", "name: x\n")
+    write(tmp_path, "Makefile", "check:\n")
+    write(tmp_path, "requirements.txt", "PyYAML\n")
+
+
+TEAM_ENTRIES = "/rules/payments/ @org/payments\n/dashboards/payments/ @org/payments\n"
+
+
+def test_codeowners_accepts_a_repo_where_the_default_owner_covers_governed_paths(tmp_path):
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES)
+    assert rulecheck.check_codeowners(tmp_path) == []
+
+
+def test_codeowners_rejects_a_more_specific_file_pattern_under_a_governed_dir(tmp_path):
+    # The exact bypass the final review reproduced: /scripts/ is platform-owned,
+    # but a later, more specific pattern hands one file to another team and
+    # GitHub resolves it last-match-wins.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/scripts/rulecheck.py @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/rulecheck.py" in f and "@org/payments" in f for f in findings)
+
+
+def test_codeowners_rejects_a_more_specific_pattern_under_templates(tmp_path):
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/templates/configmaps.yaml @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("templates/configmaps.yaml" in f for f in findings)
+
+
+def test_codeowners_rejects_a_more_specific_pattern_under_dot_github(tmp_path):
+    governed_repo(tmp_path)
+    write(tmp_path, ".github/workflows/ci.yaml", "name: ci\n")
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/.github/workflows/ci.yaml @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any(".github/workflows/ci.yaml" in f for f in findings)
+
+
+def test_codeowners_rejects_a_wildcard_pattern_under_a_governed_dir(tmp_path):
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES + "/scripts/* @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/rulecheck.py" in f for f in findings)
+
+
+def test_codeowners_rejects_a_doublestar_pattern_under_a_governed_dir(tmp_path):
+    governed_repo(tmp_path)
+    write(tmp_path, "scripts/sub/helper.py", "# helper\n")
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES + "/scripts/** @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/sub/helper.py" in f for f in findings)
+
+
+def test_codeowners_reclaiming_a_governed_dir_after_a_narrower_pattern_is_accepted(tmp_path):
+    # Last match wins, so a trailing platform entry legitimately takes the file
+    # back. Flagging this would be a false positive.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/scripts/rulecheck.py @org/payments\n/scripts/ @org/platform\n")
+    assert rulecheck.check_codeowners(tmp_path) == []
+
+
+def test_codeowners_single_star_does_not_cross_a_slash(tmp_path):
+    # /scripts/*.py must not claim scripts/sub/helper.py, so the platform-owned
+    # /scripts/ entry before it still governs that file.
+    governed_repo(tmp_path)
+    write(tmp_path, "scripts/sub/helper.py", "# helper\n")
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES + "/scripts/*.py @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/rulecheck.py" in f for f in findings)
+    assert not any("scripts/sub/helper.py" in f for f in findings)
+
+
+def test_codeowners_catches_a_pattern_for_a_file_that_does_not_exist_yet(tmp_path):
+    # The pattern itself is the evidence: a path need not exist today for the
+    # entry to take effect the moment someone adds it.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/scripts/not-created-yet.py @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/not-created-yet.py" in f for f in findings)
+
+
+def test_codeowners_rejects_a_pattern_it_cannot_evaluate(tmp_path):
+    # A check that cannot evaluate a pattern must say so, never pass it.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES + "scripts/ @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("cannot be evaluated" in f and "scripts/" in f for f in findings)
+
+
+def test_codeowners_rejects_a_bracket_expression_pattern(tmp_path):
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES + "/scripts/[abc].py @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("cannot be evaluated" in f for f in findings)
+
+
+def test_codeowners_rejects_an_owner_less_governed_path(tmp_path):
+    # A pattern with no owners at all un-assigns the path on GitHub.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES + "/scripts/\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/" in f for f in findings)
+
+
 def dash(uid: str, title: str = "T") -> str:
     return json.dumps({"uid": uid, "title": title, "panels": []})
 
