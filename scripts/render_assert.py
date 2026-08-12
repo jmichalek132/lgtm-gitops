@@ -36,6 +36,38 @@ def render(target: str) -> list[dict]:
     return [d for d in yaml.safe_load_all(out.stdout) if d]
 
 
+def deployable_sources(root: Path) -> set[str]:
+    """Every rule file the chart is expected to render, as repo-relative paths."""
+    return {
+        str(p.relative_to(root))
+        for p in (root / "rules").rglob("*.yaml")
+        if p.is_file() and not p.name.endswith("-tests.yaml")
+    }
+
+
+def source_findings(expected: set[str], rendered: set[str]) -> list[str]:
+    """Reconcile the repository against the render in BOTH directions.
+
+    Comparing only expected - rendered catches a file that silently vanished from
+    the output. It cannot catch the opposite: output that came from somewhere the
+    repository does not account for, which is what a symlinked directory under
+    rules/ produces. check_layout rejects that symlink today, but a render
+    assertion that depends on another stage to notice is not an assertion.
+    """
+    findings = []
+    for missing in sorted(expected - rendered):
+        findings.append(
+            f"{missing}: present in the repository but absent from every rendered ConfigMap. "
+            f"A silently unrendered file is indistinguishable from one that works."
+        )
+    for extra in sorted(rendered - expected):
+        findings.append(
+            f"{extra}: rendered into a ConfigMap but is not a deployable rule file in the "
+            f"repository. The chart is shipping content this repository cannot account for."
+        )
+    return findings
+
+
 def main() -> int:
     findings: list[str] = []
     rendered_sources: set[str] = set()
@@ -82,16 +114,7 @@ def main() -> int:
                         f"which means templating corrupted it: {exc}"
                     )
 
-    expected = {
-        str(p.relative_to(ROOT))
-        for p in (ROOT / "rules").rglob("*.yaml")
-        if p.is_file() and not p.name.endswith("-tests.yaml")
-    }
-    for missing in sorted(expected - rendered_sources):
-        findings.append(
-            f"{missing}: present in the repository but absent from every rendered ConfigMap. "
-            f"A silently unrendered file is indistinguishable from one that works."
-        )
+    findings.extend(source_findings(deployable_sources(ROOT), rendered_sources))
 
     for f in findings:
         print(f"  {f}", file=sys.stderr)
