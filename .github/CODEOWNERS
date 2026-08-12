@@ -4,12 +4,20 @@
 # Paths that govern the checks themselves. A team must not be able to approve
 # changes to the contract that governs its own changes, so these stay with the
 # platform team regardless of who is editing rules.
+#
+# Order matters: GitHub applies the LAST pattern that matches a path, so any
+# entry added below these can take a governed file back out of platform hands.
+# scripts/rulecheck.py checks exactly that and fails the build if it happens.
 /Chart.yaml @org/platform
 /values.yaml @org/platform
 /values.schema.json @org/platform
 /templates/ @org/platform
 /validation.yaml @org/platform
 /scripts/ @org/platform
+/tests/ @org/platform
+/tools/ @org/platform
+/Makefile @org/platform
+/requirements.txt @org/platform
 /.github/ @org/platform
 
 # Per-team ownership. One entry covers a team's rules and its dashboards.

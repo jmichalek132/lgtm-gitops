@@ -505,6 +505,32 @@ def test_codeowners_rejects_a_bracket_expression_pattern(tmp_path):
     assert any("cannot be evaluated" in f for f in findings)
 
 
+import pytest
+
+
+@pytest.mark.parametrize(
+    "entry,probe",
+    [
+        ("/Makefile", "Makefile"),
+        ("/requirements.txt", "requirements.txt"),
+        ("/tests/", "tests/test_rulecheck.py"),
+        ("/tools/", "tools/checksums.txt"),
+    ],
+)
+def test_codeowners_protects_every_check_governing_path(tmp_path, entry, probe):
+    # CI's only step is `make check`, so the Makefile is CI; tools/checksums.txt
+    # gates the binary supply chain; tests/ defines what passing means.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES + f"{entry} @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any(probe in f for f in findings), f"{entry} is not protected"
+
+
+def test_platform_owned_paths_covers_the_check_governing_surface(tmp_path):
+    for entry in ("/Makefile", "/requirements.txt", "/tests/", "/tools/"):
+        assert entry in rulecheck.PLATFORM_OWNED_PATHS
+
+
 def test_codeowners_rejects_an_owner_less_governed_path(tmp_path):
     # A pattern with no owners at all un-assigns the path on GitHub.
     governed_repo(tmp_path)

@@ -310,7 +310,12 @@ def check_env_matchers(root: Path) -> list[str]:
 
 
 # Paths that govern the checks themselves. If a team could approve changes to
-# these, the contract would be self-modifiable.
+# these, the contract would be self-modifiable. The test of membership is not
+# "does this file feel like infrastructure" but "could editing it change what
+# passes": CI's only step is `make check`, so the Makefile IS the pipeline;
+# requirements.txt chooses the Python that runs the checks; tools/checksums.txt
+# is the only thing standing between a pinned download and an arbitrary binary;
+# and tests/ defines what "passing" means for everything in scripts/.
 PLATFORM_OWNED_PATHS = (
     "/Chart.yaml",
     "/values.yaml",
@@ -318,6 +323,10 @@ PLATFORM_OWNED_PATHS = (
     "/templates/",
     "/validation.yaml",
     "/scripts/",
+    "/tests/",
+    "/tools/",
+    "/Makefile",
+    "/requirements.txt",
     "/.github/",
 )
 
