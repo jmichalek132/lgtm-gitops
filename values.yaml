@@ -1,0 +1,12 @@
+# Which ruler evaluates the rules this release renders.
+# One ArgoCD Application per value: mimir, loki, prometheus.
+target: mimir
+
+# The Mimir/Loki tenant. Becomes the sidecar's target directory (relative to its
+# FOLDER) and the ConfigMap name prefix. Ignored as a directory for the
+# prometheus target, which has no tenants, but still used as a name prefix.
+tenant: platform
+
+# Escape hatch for bootstrapping a target that has no rules yet. Leave false:
+# an empty render plus ArgoCD prune deletes every ConfigMap for the target.
+allowEmpty: false

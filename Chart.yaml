@@ -1,0 +1,5 @@
+apiVersion: v2
+name: observability-rules
+description: Alerting and recording rules delivered as ConfigMaps to the Mimir, Loki and meta-Prometheus rulers
+type: application
+version: 0.1.0

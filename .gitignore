@@ -1,2 +1,7 @@
 # SDD scratch workspace (ledger, briefs, review packages)
 .superpowers/
+
+.promruval_cache.json
+__pycache__/
+.pytest_cache/
+*.pyc

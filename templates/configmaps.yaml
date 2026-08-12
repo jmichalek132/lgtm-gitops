@@ -1,0 +1,26 @@
+{{- $target := required "values.target is required" .Values.target -}}
+{{- $tenant := required "values.tenant is required" .Values.tenant -}}
+{{- range $path, $_ := .Files.Glob (printf "rules/*/%s/**.yaml" $target) }}
+  {{- if not (hasSuffix "-tests.yaml" (base $path)) }}
+    {{- $key  := $path | trimPrefix "rules/" | replace "/" "-" }}
+    {{- $team := index (splitList "/" $path) 1 }}
+    {{- $name := printf "%s-%s" $tenant ($key | trimSuffix ".yaml") }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    rules: {{ $target | quote }}
+    team: {{ $team | quote }}
+    tenant: {{ $tenant | quote }}
+  annotations:
+    observability-rules/source-path: {{ $path | quote }}
+  {{- if ne $target "prometheus" }}
+    k8s-sidecar-target-directory: {{ $tenant | quote }}
+  {{- end }}
+data:
+  {{ $key }}: |-
+    {{- $.Files.Get $path | nindent 4 }}
+  {{- end }}
+{{- end }}

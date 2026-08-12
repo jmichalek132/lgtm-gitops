@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target", "tenant"],
+  "properties": {
+    "target": {
+      "type": "string",
+      "enum": ["mimir", "loki", "prometheus"]
+    },
+    "tenant": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+    "allowEmpty": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}
