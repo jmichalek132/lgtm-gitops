@@ -208,6 +208,73 @@ def test_contract_skips_test_fixtures(tmp_path):
     assert rulecheck.check_contract(tmp_path) == []
 
 
+FIXTURE = """\
+rule_files:
+  - a-alerts.yaml
+
+tests:
+  - interval: 1m
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PaymentsA
+        exp_alerts: []
+"""
+
+
+def test_fixtures_accepts_a_fixture_that_tests_something(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", FIXTURE)
+    assert rulecheck.check_fixtures(tmp_path) == []
+
+
+def test_fixtures_rejects_an_empty_tests_list(tmp_path):
+    # `promtool test rules` prints SUCCESS and exits 0 for `tests: []`, so
+    # executing a fixture proves nothing about whether it still tests anything.
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml",
+          "rule_files:\n  - a-alerts.yaml\n\ntests: []\n")
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert any("tests" in f for f in findings)
+
+
+def test_fixtures_rejects_a_missing_tests_key(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml",
+          "rule_files:\n  - a-alerts.yaml\n")
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert any("tests" in f for f in findings)
+
+
+def test_fixtures_rejects_a_null_tests_key(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml",
+          "rule_files:\n  - a-alerts.yaml\ntests:\n")
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert any("tests" in f for f in findings)
+
+
+def test_fixtures_rejects_a_tests_key_that_is_not_a_list(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml",
+          "rule_files:\n  - a-alerts.yaml\ntests: yes\n")
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert any("tests" in f for f in findings)
+
+
+def test_fixtures_requires_rule_files(tmp_path):
+    # A fixture naming no rule file cannot be exercising any rule in this repo.
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml",
+          "rule_files: []\n\ntests:\n  - interval: 1m\n")
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert any("rule_files" in f for f in findings)
+
+
+def test_fixtures_reports_unparseable_yaml(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", "tests: [\n")
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert findings
+
+
+def test_fixtures_ignores_non_fixture_files(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    assert rulecheck.check_fixtures(tmp_path) == []
+
+
 def expr_rule(expr: str) -> str:
     return f"""\
 groups:

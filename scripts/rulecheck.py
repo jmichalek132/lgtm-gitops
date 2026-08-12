@@ -218,6 +218,47 @@ def check_contract(root: Path) -> list[str]:
     return findings
 
 
+def check_fixtures(root: Path) -> list[str]:
+    """Every *-tests.yaml fixture must actually assert something.
+
+    `promtool test rules` prints SUCCESS and exits 0 for a fixture whose body is
+    `tests: []`, so stage 5 executing a fixture proves only that the file parsed.
+    A gutted fixture is precisely the stale fixture the spec promises cannot go
+    unnoticed, and it is the easiest way to make a failing test "pass".
+    """
+    findings: list[str] = []
+    for path in rule_files(root):
+        if not path.name.endswith("-tests.yaml") or path.is_symlink():
+            continue
+        rel = path.relative_to(root)
+
+        try:
+            doc = yaml.safe_load(path.read_text()) or {}
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            findings.append(f"{rel}: unreadable or unparseable YAML: {exc}")
+            continue
+        if not isinstance(doc, dict):
+            findings.append(f"{rel}: expected a mapping at the document root")
+            continue
+
+        tests = doc.get("tests")
+        if not isinstance(tests, list) or not tests:
+            findings.append(
+                f"{rel}: 'tests' is missing or empty, so this fixture asserts nothing. "
+                f"promtool reports SUCCESS for it, which makes a gutted fixture "
+                f"indistinguishable from a passing one."
+            )
+
+        rule_files_key = doc.get("rule_files")
+        if not isinstance(rule_files_key, list) or not rule_files_key:
+            findings.append(
+                f"{rel}: 'rule_files' is missing or empty, so this fixture exercises "
+                f"no rule file in this repository"
+            )
+
+    return findings
+
+
 # Any appearance of the label, in any matcher form, so non-canonical usage is
 # caught rather than skipped. Four details are load-bearing:
 #
@@ -652,6 +693,7 @@ def check_dashboards(root: Path, base_ref: str | None = None) -> list[str]:
 CHECKS = {
     "layout": check_layout,
     "contract": check_contract,
+    "fixtures": check_fixtures,
     "envmatcher": check_env_matchers,
     "codeowners": check_codeowners,
     "dashboards": check_dashboards,

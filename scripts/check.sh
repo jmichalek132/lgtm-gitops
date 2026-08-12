@@ -80,6 +80,10 @@ elif require lokitool; then
 fi
 
 stage "5. unit tests (promtool test rules)"
+# Executing a fixture is not the same as a fixture testing something: promtool
+# prints SUCCESS and exits 0 for `tests: []`. That assertion lives in stage 1
+# (rulecheck's `fixtures` check), which parses every fixture and fails when its
+# `tests` or `rule_files` list is absent or empty.
 if require promtool; then
   collect < <(find rules -name '*-tests.yaml' -print0 | sort -z)
   if [ "${#FILES[@]}" -eq 0 ]; then
