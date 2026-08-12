@@ -474,7 +474,12 @@ def codeowners_pattern_regex(pattern: str) -> re.Pattern[str] | None:
     # A trailing slash marks a directory: it owns everything beneath, not itself.
     if body.endswith("/"):
         return re.compile(rf"^{translated}.+$")
-    return re.compile(rf"^{translated}$")
+    last_seg = body.rsplit("/", 1)[-1]
+    if last_seg in ("*", "**"):
+        return re.compile(rf"^{translated}$")
+    # No trailing slash: matches the path AND everything beneath it (a pattern
+    # naming a directory claims its contents). hmarr/codeowners match.go:172.
+    return re.compile(rf"^{translated}(?:/.*)?$")
 
 
 def codeowners_pattern_witness(pattern: str) -> str | None:
