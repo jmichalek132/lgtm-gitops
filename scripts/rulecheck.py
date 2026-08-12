@@ -219,17 +219,30 @@ def check_contract(root: Path) -> list[str]:
 
 
 # Any appearance of the label, in any matcher form, so non-canonical usage is
-# caught rather than skipped. Three details are load-bearing:
+# caught rather than skipped. Four details are load-bearing:
 #
 #   (?<![a-zA-Z0-9_])   word boundary, so my_deployment_environment is not matched
+#   quoted label name   Prometheus 3 accepts a quoted label name inside braces
+#                       (UTF-8 label support), so up{"deployment_environment"="prod"}
+#                       is valid PromQL. Verified with promtool 3.13.2 for all three
+#                       delimiters; the CI-pinned promtool 3.1.0 accepts the double
+#                       quoted form too. A regex matching only the bare name let this
+#                       ship green: a real bypass of the contract, found in review.
 #   "..." | '...' | `...`  PromQL accepts single quotes and backticks as string
 #                       delimiters, verified with promtool. Matching only double
 #                       quotes would let deployment_environment='prod' bypass the
 #                       contract silently, the worst possible failure for a check
 #                       whose entire purpose is making the environment set derivable.
 #   (?:=~|!~|=|!=)      every operator, so non-canonical ones are reported, not skipped
+#
+# The quoted label-name forms can never satisfy ENV_CANONICAL_RE, so matching them
+# here is exactly what turns a silent pass into a reported non-canonical matcher.
+ENV_LABEL_ALT = (
+    r"""(?:(?<![a-zA-Z0-9_])deployment_environment|"deployment_environment"|"""
+    r"""'deployment_environment'|`deployment_environment`)"""
+)
 ENV_ANY_RE = re.compile(
-    r"""(?<![a-zA-Z0-9_])deployment_environment\s*(?:=~|!~|=|!=)\s*"""
+    ENV_LABEL_ALT + r"""\s*(?:=~|!~|=|!=)\s*"""
     r"""(?:"[^"]*"|'[^']*'|`[^`]*`)"""
 )
 # The one permitted form. No \s*, double quotes only: whitespace and alternative

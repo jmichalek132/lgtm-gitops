@@ -305,6 +305,45 @@ def test_envmatcher_rejects_backtick_matcher(tmp_path):
     assert any("canonical" in f for f in findings)
 
 
+def test_envmatcher_rejects_a_double_quoted_label_name(tmp_path):
+    # Prometheus 3 accepts a quoted label name inside braces, verified with
+    # promtool. Without this the matcher contract is bypassable in a form that
+    # ships green through every syntax check.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{"deployment_environment"="prod"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_a_single_quoted_label_name(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule("up{'deployment_environment'='prod'} == 0"))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_a_backtick_quoted_label_name(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule("up{`deployment_environment`=\"prod\"} == 0"))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_a_quoted_label_name_with_the_canonical_operator(tmp_path):
+    # The values are canonical; only the label-name quoting differs. That still
+    # has to fail, or the selector stops being derivable by a simple parse.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{"deployment_environment"=~"staging|prod"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_ignores_a_quoted_longer_label_with_the_same_suffix(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{"my_deployment_environment"="prod"} == 0'))
+    assert rulecheck.check_env_matchers(tmp_path) == []
+
+
 def test_envmatcher_ignores_a_longer_label_with_the_same_suffix(tmp_path):
     write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
           expr_rule('up{my_deployment_environment="prod"} == 0'))
