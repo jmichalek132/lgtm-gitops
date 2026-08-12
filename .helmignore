@@ -1,0 +1,39 @@
+# helm walks the entire chart directory. The chart reads Chart.yaml, values.yaml,
+# values.schema.json, templates/ and rules/ and nothing else (see
+# templates/configmaps.yaml, whose only input is .Files.Glob over rules/), so
+# everything else is excluded here.
+#
+# This is not tidiness. Without it helm descends into .git, .venv, docs/ and
+# .superpowers/, which is where the "found symbolic link" INFO lines on every run
+# came from, and a single broken symlink anywhere in the tree aborts
+# `helm template` with "Error: error evaluating symlink" -- failing the render
+# stage for a reason that has nothing to do with any rule.
+#
+# Written as an explicit exclusion list rather than `*` plus `!` exceptions
+# because helm's ignore parser does not honour negation: a .helmignore of `*`
+# followed by `!Chart.yaml` makes helm report "Chart.yaml file is missing"
+# (verified with helm v4.2.3 against this chart).
+.git/
+.gitignore
+.github/
+.helmignore
+.pytest_cache/
+.superpowers/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
+*.swp
+Makefile
+README.md
+dashboards/
+docs/
+examples/
+requirements.txt
+scripts/
+tests/
+tools/
+validation.yaml
