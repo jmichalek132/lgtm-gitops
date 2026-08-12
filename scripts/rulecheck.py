@@ -596,6 +596,15 @@ def check_codeowners(root: Path) -> list[str]:
                     f"{PLATFORM_OWNER} must own it, otherwise a team can approve changes "
                     f"to the checks that govern it"
                 )
+            elif set(owners) != {PLATFORM_OWNER}:
+                extra = sorted(set(owners) - {PLATFORM_OWNER})
+                findings.append(
+                    f"CODEOWNERS gives '{probe}' (governed by '{entry}') to "
+                    f"{PLATFORM_OWNER} AND {extra} through pattern '{pattern}'. On "
+                    f"GitHub any co-owner can approve alone, so {extra} can still "
+                    f"approve changes to the checks that govern it; "
+                    f"{PLATFORM_OWNER} must be the sole owner"
+                )
 
     return findings
 

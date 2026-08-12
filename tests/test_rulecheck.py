@@ -661,6 +661,20 @@ def test_codeowners_rejects_an_owner_less_governed_path(tmp_path):
     assert any("scripts/" in f for f in findings)
 
 
+def test_codeowners_rejects_a_governing_path_with_an_extra_co_owner(tmp_path):
+    # On GitHub either co-owner can approve alone, so a governing path is only
+    # actually protected when the platform team is the SOLE owner.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(
+        CODEOWNERS_HEADER
+        + "/rules/payments/ @org/payments\n/dashboards/payments/ @org/payments\n"
+        + "/scripts/ @org/platform @org/payments\n"  # Co-owner can approve alone
+    )
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/" in f and "@org/payments" in f for f in findings)
+
+
 def dash(uid: str, title: str = "T") -> str:
     return json.dumps({"uid": uid, "title": title, "panels": []})
 
