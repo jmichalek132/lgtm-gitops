@@ -1,5 +1,7 @@
 import sys
 from pathlib import Path
+import json
+import subprocess
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import rulecheck
@@ -386,3 +388,50 @@ def test_codeowners_rejects_a_governing_path_reassigned_to_another_team(tmp_path
     )
     findings = rulecheck.check_codeowners(tmp_path)
     assert any("/scripts/" in f for f in findings)
+
+
+def dash(uid: str, title: str = "T") -> str:
+    return json.dumps({"uid": uid, "title": title, "panels": []})
+
+
+def test_dashboards_accepts_valid_files(tmp_path):
+    write(tmp_path, "dashboards/payments/overview.json", dash("payments-overview"))
+    assert rulecheck.check_dashboards(tmp_path) == []
+
+
+def test_dashboards_rejects_malformed_json(tmp_path):
+    write(tmp_path, "dashboards/payments/overview.json", "{not json")
+    findings = rulecheck.check_dashboards(tmp_path)
+    assert any("JSON" in f for f in findings)
+
+
+def test_dashboards_requires_a_uid(tmp_path):
+    write(tmp_path, "dashboards/payments/overview.json", json.dumps({"title": "T"}))
+    findings = rulecheck.check_dashboards(tmp_path)
+    assert any("uid" in f for f in findings)
+
+
+def test_dashboards_rejects_duplicate_uids(tmp_path):
+    write(tmp_path, "dashboards/payments/a.json", dash("same-uid"))
+    write(tmp_path, "dashboards/fraud/b.json", dash("same-uid"))
+    findings = rulecheck.check_dashboards(tmp_path)
+    assert any("same-uid" in f and "unique" in f for f in findings)
+
+
+def test_dashboards_rejects_bad_filename(tmp_path):
+    write(tmp_path, "dashboards/payments/Overview_Panel.json", dash("x"))
+    findings = rulecheck.check_dashboards(tmp_path)
+    assert any("filename" in f.lower() for f in findings)
+
+
+def test_dashboards_detects_a_changed_uid_against_the_base_ref(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+    write(tmp_path, "dashboards/payments/overview.json", dash("original-uid"))
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+
+    write(tmp_path, "dashboards/payments/overview.json", dash("changed-uid"))
+    findings = rulecheck.check_dashboards(tmp_path, base_ref="HEAD")
+    assert any("original-uid" in f for f in findings)

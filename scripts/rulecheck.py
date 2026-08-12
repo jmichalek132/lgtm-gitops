@@ -13,7 +13,9 @@ human-readable findings. An empty list means the check passed.
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -28,6 +30,7 @@ PLATFORM_OWNER = f"@org/{PLATFORM_TEAM}"
 TEST_FIXTURE_TARGETS = ("mimir", "prometheus")
 
 RULE_FILENAME_RE = re.compile(r"^[a-z0-9-]+\.yaml$")
+DASHBOARD_FILENAME_RE = re.compile(r"^[a-z0-9-]+\.json$")
 DNS_LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 MAX_NAME_BYTES = 253
 MAX_SEGMENT_BYTES = 63
@@ -392,19 +395,103 @@ def check_codeowners(root: Path) -> list[str]:
     return findings
 
 
+def dashboard_files(root: Path) -> list[Path]:
+    base = root / "dashboards"
+    if not base.is_dir():
+        return []
+    return sorted(p for p in base.rglob("*.json") if p.is_file())
+
+
+def _uids_at_ref(root: Path, ref: str) -> dict[str, str]:
+    """Map relative path -> uid as of the given git ref. Missing files are skipped."""
+    try:
+        listing = subprocess.run(
+            ["git", "-C", str(root), "ls-tree", "-r", "--name-only", ref, "dashboards/"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+    except subprocess.CalledProcessError:
+        return {}
+
+    uids: dict[str, str] = {}
+    for rel in listing:
+        if not rel.endswith(".json"):
+            continue
+        try:
+            blob = subprocess.run(
+                ["git", "-C", str(root), "show", f"{ref}:{rel}"],
+                capture_output=True, text=True, check=True,
+            ).stdout
+            uid = json.loads(blob).get("uid")
+        except (subprocess.CalledProcessError, json.JSONDecodeError, AttributeError):
+            continue
+        if uid:
+            uids[rel] = uid
+    return uids
+
+
+def check_dashboards(root: Path, base_ref: str | None = None) -> list[str]:
+    findings: list[str] = []
+    seen_uids: dict[str, Path] = {}
+    current: dict[str, str] = {}
+
+    for path in dashboard_files(root):
+        rel = path.relative_to(root)
+
+        if not DASHBOARD_FILENAME_RE.match(path.name):
+            findings.append(f"{rel}: filename must match {DASHBOARD_FILENAME_RE.pattern}")
+
+        try:
+            doc = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:
+            findings.append(f"{rel}: invalid JSON: {exc}")
+            continue
+
+        uid = doc.get("uid")
+        if not uid:
+            findings.append(f"{rel}: dashboard must declare a 'uid'")
+            continue
+
+        current[str(rel)] = uid
+
+        if uid in seen_uids and seen_uids[uid] != path:
+            findings.append(
+                f"{rel}: uid '{uid}' is not unique; also used by "
+                f"{seen_uids[uid].relative_to(root)}"
+            )
+        else:
+            seen_uids.setdefault(uid, path)
+
+    if base_ref:
+        for rel, old_uid in _uids_at_ref(root, base_ref).items():
+            new_uid = current.get(rel)
+            if new_uid and new_uid != old_uid:
+                findings.append(
+                    f"{rel}: uid changed from '{old_uid}' to '{new_uid}'. This orphans the "
+                    f"live dashboard and breaks every link and annotation pointing at it. "
+                    f"If deliberate, say so explicitly in the pull request."
+                )
+
+    return findings
+
+
 CHECKS = {
     "layout": check_layout,
     "contract": check_contract,
     "envmatcher": check_env_matchers,
     "codeowners": check_codeowners,
+    "dashboards": check_dashboards,
 }
 
 
 def main(argv: list[str]) -> int:
+    import os
+
     root = Path(argv[1]) if len(argv) > 1 else Path.cwd()
+    base_ref = os.environ.get("BASE_REF") or None
+
     failed = False
     for name, fn in CHECKS.items():
-        findings = fn(root)
+        findings = fn(root, base_ref) if name == "dashboards" else fn(root)
         if findings:
             failed = True
             print(f"[{name}] {len(findings)} finding(s):", file=sys.stderr)
