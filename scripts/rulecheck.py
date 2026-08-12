@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 TARGETS = ("mimir", "loki", "prometheus")
 ENVIRONMENTS = ("dev", "staging", "prod")
 SEVERITIES = ("info", "warning", "error", "critical")
@@ -121,8 +123,6 @@ def check_layout(root: Path) -> list[str]:
 
     return findings
 
-
-import yaml
 
 SUMMARY_ALIASES = ("summary", "message", "description")
 URL_ANNOTATIONS = ("runbook_url", "dashboard_url")

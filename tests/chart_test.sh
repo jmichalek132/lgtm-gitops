@@ -95,8 +95,12 @@ assert_contains "$OUT_PROM" "name: platform-platform-prometheus-deadman-alerts" 
 assert_not_contains "$OUT_PROM" "k8s-sidecar-target-directory" \
   "prometheus target omits the tenant annotation entirely"
 
-mkdir -p rules/platform/mimir/nested
-cat > rules/platform/mimir/nested/example-alerts.yaml <<'YAML'
+# Built inside $EMPTY_CHART, never in the live rules/ tree. Writing a real rule
+# file into rules/ and removing it afterwards means an interrupted run leaves a
+# stray, contract-compliant file behind that every check happily passes. The
+# EXIT trap above already covers $EMPTY_CHART.
+mkdir -p "$EMPTY_CHART/rules/platform/mimir/nested"
+cat > "$EMPTY_CHART/rules/platform/mimir/nested/example-alerts.yaml" <<'YAML'
 groups:
   - name: nested-example
     rules:
@@ -107,9 +111,9 @@ groups:
           summary: Proves subfolders flatten into the generated key.
           runbook_url: https://runbooks.internal/observability-rules/example
 YAML
-OUT_NESTED=$(helm template t . --set target=mimir --set tenant=platform)
+OUT_NESTED=$(helm template t "$EMPTY_CHART" --set target=mimir --set tenant=platform)
 assert_contains "$OUT_NESTED" "platform-mimir-nested-example-alerts.yaml:" \
   "subfolder path flattens into the data key"
-rm -rf rules/platform/mimir/nested
+rm -rf "$EMPTY_CHART/rules/platform/mimir"
 
 summary
