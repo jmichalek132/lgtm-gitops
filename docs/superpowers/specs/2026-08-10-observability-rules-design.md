@@ -186,8 +186,24 @@ of the ordered environment list in list order without duplicates, no negation, n
 plain `=`. If an expression contains the matcher more than once, every occurrence
 must be byte-identical.
 
-CI parses the PromQL and LogQL selector AST rather than matching raw YAML text, so
-a matcher inside a comment or a differently formatted expression cannot slip past.
+> **Implementation deviation (2026-08-13).** This section originally specified
+> that CI parse the PromQL and LogQL selector AST rather than match raw text.
+> What was built is a regex over the `expr` field of each rule, scoped so that a
+> matcher in a comment, an annotation or a summary string cannot influence the
+> result. The reason is dialect coverage: no single available parser accepts both
+> PromQL and LogQL, and adding a Python PromQL parser plus a LogQL one to hold a
+> formatting contract was judged disproportionate for the repository's first
+> phase. The implementation plan records the deviation; this note brings the
+> design of record in line with it.
+>
+> **This has already cost one real bypass.** The regex matched only the bare label
+> name, so `up{"deployment_environment"="prod"}` produced zero findings while
+> promtool accepted it as valid PromQL (Prometheus 3 permits a quoted label name
+> inside braces). The final whole-branch review caught it and it is fixed, but it
+> is the exact class of failure an AST would have made impossible: the regex must
+> enumerate every spelling the parser accepts, and the parser's list is the one
+> that keeps growing. Revisit the AST decision when a second such bypass appears,
+> or sooner if a maintained PromQL parser with LogQL support becomes available.
 
 This is the single highest-leverage decision in the spec for goal 3. It makes the
 environment set of every rule machine-readable **from the rule itself**, so a
@@ -621,8 +637,12 @@ cheapest first.
    name/key length. Files rejected outside `rules/<team>/<target>/**.yaml`;
    symlinks rejected. CODEOWNERS and folder sets agree in both directions.
    `owner` label equals team folder. Alert names unique repository-wide.
-   Canonical environment matcher enforced **via the PromQL/LogQL AST, not by
-   grepping YAML**. `prometheus/` only under the configured platform-team folder.
+   Canonical environment matcher enforced by a regex over each rule's `expr`
+   field only, never over whole-file text, so a matcher in a comment, an
+   annotation or a summary cannot influence the result. **This is a deviation
+   from the original AST requirement**; see the note in section 4 for the reason
+   and for the bypass it has already cost. `prometheus/` only under the
+   configured platform-team folder.
 2. **Contract.** `promruval validate --config-file validation.yaml <paths...>`
    with explicit non-test file paths, carrying ***REMOVED***'s four rules minus its
    hand-maintained owner list, which stage 1 now derives from the filesystem.
@@ -671,9 +691,26 @@ PR-controlled code.
 **Branch protection is the enforcement, CODEOWNERS is only routing.** Require the
 CI status and at least one CODEOWNER approval, dismiss stale approvals, and block
 force pushes. CODEOWNERS must assign the platform team to `Chart.yaml`,
-`values.yaml`, `values.schema.json`, `templates/`, `validation.yaml`, `scripts/`
-and `.github/`, in addition to per-team rule folders. Without that, a team can
-approve its own change to the very checks that govern it.
+`values.yaml`, `values.schema.json`, `templates/`, `validation.yaml`, `scripts/`,
+`tests/`, `tools/`, `Makefile`, `requirements.txt` and `.github/`, in addition to
+per-team rule folders. Without that, a team can approve its own change to the very
+checks that govern it.
+
+The test of membership is not whether a path looks like infrastructure but
+whether editing it could change what passes. CI's only step is `make check`, so
+the Makefile is the pipeline; `requirements.txt` chooses the Python that runs the
+checks; `tools/checksums.txt` is the only thing between a pinned download and an
+arbitrary binary; and `tests/` defines what passing means for everything in
+`scripts/`. The last four were added on 2026-08-13 after the final review showed
+they were absent.
+
+**Ownership is checked per path, not per pattern string.** GitHub applies the
+last CODEOWNERS pattern that matches a path, so a more specific pattern later in
+the file silently overrides an earlier directory entry: `/scripts/ @org/platform`
+followed by `/scripts/rulecheck.py @org/payments` hands that file to payments.
+The check therefore compiles every pattern to a path regex and resolves each
+governed path the way GitHub does. Patterns outside the supported anchored subset
+are reported as unevaluatable rather than assumed safe.
 
 **Optional, not day-one:** require a `-tests.yaml` companion for any alert with
 `severity: critical`, targeting the alerts that will page someone without

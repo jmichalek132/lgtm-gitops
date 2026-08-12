@@ -28,13 +28,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Not checksum-verified: pip trusts the index and the pins in
+      # requirements.txt. Add --require-hashes with a fully hashed requirements
+      # file to close this, which also means pinning every transitive dependency.
       - run: pip install -r requirements.txt
 
+      # Not checksum-verified either: the action is pinned by commit SHA, so what
+      # is trusted is azure/setup-helm at that SHA and whatever it downloads.
       - uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
         with:
           version: ${{ env.HELM_VERSION }}
 
-      # Every download is checksum-verified. Pinning a version proves which URL
+      # The three downloads in THIS step are checksum-verified; helm and pip
+      # above are not, see their comments. Pinning a version proves which URL
       # was requested, not what arrived. Generate tools/checksums.txt once by
       # downloading each artifact and recording `sha256sum <file>`; CI then fails
       # if any of them ever changes underneath the pin.

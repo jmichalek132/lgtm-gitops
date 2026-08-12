@@ -27,7 +27,10 @@ Design: [`docs/superpowers/specs/2026-08-10-observability-rules-design.md`](docs
 
    No matcher at all means all environments. Values come from `dev`, `staging`,
    `prod`, in that order, no duplicates, no negation, no plain `=`.
-4. Run `make check` before pushing. It runs exactly what CI runs.
+4. Run `make check` before pushing. CI runs the same *commands*: its only step
+   is `make check`, so nothing is checked in CI that you cannot run locally.
+   It does not run the same tool *versions* unless you pin them yourself, see
+   [Local setup](#local-setup).
 
 ## Adding a dashboard
 
@@ -61,3 +64,26 @@ make check
 `make test` and `make check` both assume that venv is active (or `.venv/bin`
 is first on `PATH`); they invoke `python3`/`pytest` directly and do not
 activate it for you.
+
+### Tool versions
+
+CI runs the same commands as `make check`, but it pins its toolchain and your
+machine almost certainly does not. The pins live in `.github/workflows/ci.yaml`
+and are, at the time of writing:
+
+| tool      | CI pin    | installed by                          |
+| --------- | --------- | ------------------------------------- |
+| helm      | `v3.16.3` | `azure/setup-helm`, pinned by SHA     |
+| promtool  | `3.1.0`   | release tarball, checksum-verified    |
+| promruval | `3.2.0`   | release tarball, checksum-verified    |
+| lokitool  | `3.3.2`   | release zip, checksum-verified        |
+| Python    | `3.12`    | `actions/setup-python`, pinned by SHA |
+
+`.github/workflows/ci.yaml` is the source of truth; read the `env:` block there
+rather than this table if the two disagree.
+
+A version difference can change a result. Helm's `**` glob, which the rule
+subfolder feature depends on, and promtool's PromQL parser, which decides
+which expressions are even valid, are both version-sensitive. If a check
+passes locally and fails in CI, compare versions first: `helm version --short`,
+`promtool --version`, `promruval version`, `lokitool version`.
