@@ -77,4 +77,39 @@ assert_fails_with "generated ConfigMap name or key exceeds 253 bytes" \
   helm template t "$EMPTY_CHART" --set target=mimir --set tenant=platform
 rm -rf "$EMPTY_CHART/rules/platform/mimir"
 
+echo "chart: exclusion, subfolders and prometheus target"
+
+OUT_MIMIR=$(helm template t . --set target=mimir --set tenant=platform)
+assert_not_contains "$OUT_MIMIR" "deadman-alerts-tests" \
+  "-tests.yaml fixtures are excluded from ConfigMaps"
+
+OUT_LOKI=$(helm template t . --set target=loki --set tenant=platform)
+assert_contains "$OUT_LOKI" "name: platform-platform-loki-deadman-alerts" \
+  "loki target renders its own canary"
+assert_contains "$OUT_LOKI" 'k8s-sidecar-target-directory: "platform"' \
+  "loki target keeps the tenant annotation"
+
+OUT_PROM=$(helm template t . --set target=prometheus --set tenant=platform)
+assert_contains "$OUT_PROM" "name: platform-platform-prometheus-deadman-alerts" \
+  "prometheus target renders its own canary"
+assert_not_contains "$OUT_PROM" "k8s-sidecar-target-directory" \
+  "prometheus target omits the tenant annotation entirely"
+
+mkdir -p rules/platform/mimir/nested
+cat > rules/platform/mimir/nested/example-alerts.yaml <<'YAML'
+groups:
+  - name: nested-example
+    rules:
+      - alert: NestedExampleAlert
+        expr: vector(1)
+        labels: {severity: info, owner: platform}
+        annotations:
+          summary: Proves subfolders flatten into the generated key.
+          runbook_url: https://runbooks.internal/observability-rules/example
+YAML
+OUT_NESTED=$(helm template t . --set target=mimir --set tenant=platform)
+assert_contains "$OUT_NESTED" "platform-mimir-nested-example-alerts.yaml:" \
+  "subfolder path flattens into the data key"
+rm -rf rules/platform/mimir/nested
+
 summary

@@ -1,0 +1,15 @@
+groups:
+  - name: delivery-canary
+    interval: 1m
+    rules:
+      - alert: ObservabilityRulesLokiDeadman
+        expr: |
+          (sum(count_over_time({job=~".+"}[5m])) or vector(1)) >= 0
+        labels:
+          severity: info
+          owner: platform
+        annotations:
+          summary: >-
+            Always-firing canary proving the loki rules delivery path is alive.
+            Its absence, not its presence, is the alert.
+          runbook_url: https://runbooks.internal/observability-rules/deadman

@@ -1,0 +1,14 @@
+groups:
+  - name: delivery-canary
+    interval: 1m
+    rules:
+      - alert: ObservabilityRulesPrometheusDeadman
+        expr: vector(1)
+        labels:
+          severity: info
+          owner: platform
+        annotations:
+          summary: >-
+            Always-firing canary proving the meta-Prometheus rules delivery path
+            is alive. Its absence, not its presence, is the alert.
+          runbook_url: https://runbooks.internal/observability-rules/deadman

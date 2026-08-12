@@ -1,0 +1,19 @@
+rule_files:
+  - deadman-alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ObservabilityRulesMimirDeadman
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              owner: platform
+            exp_annotations:
+              summary: >-
+                Always-firing canary proving the mimir rules delivery path is alive.
+                Its absence, not its presence, is the alert.
+              runbook_url: https://runbooks.internal/observability-rules/deadman
