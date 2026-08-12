@@ -214,9 +214,101 @@ def check_contract(root: Path) -> list[str]:
     return findings
 
 
+# Any appearance of the label, in any matcher form, so non-canonical usage is
+# caught rather than skipped. Three details are load-bearing:
+#
+#   (?<![a-zA-Z0-9_])   word boundary, so my_deployment_environment is not matched
+#   "..." | '...' | `...`  PromQL accepts single quotes and backticks as string
+#                       delimiters, verified with promtool. Matching only double
+#                       quotes would let deployment_environment='prod' bypass the
+#                       contract silently, the worst possible failure for a check
+#                       whose entire purpose is making the environment set derivable.
+#   (?:=~|!~|=|!=)      every operator, so non-canonical ones are reported, not skipped
+ENV_ANY_RE = re.compile(
+    r"""(?<![a-zA-Z0-9_])deployment_environment\s*(?:=~|!~|=|!=)\s*"""
+    r"""(?:"[^"]*"|'[^']*'|`[^`]*`)"""
+)
+# The one permitted form. No \s*, double quotes only: whitespace and alternative
+# delimiters fail this by construction and are reported as non-canonical.
+ENV_CANONICAL_RE = re.compile(r'deployment_environment=~"([a-z|]+)"')
+
+
+def iter_expressions(root: Path):
+    """Yield (path, rule_name, expr) for every rule that has an expression.
+
+    Only the `expr` field is examined, so a matcher inside an annotation,
+    a summary string or a YAML comment cannot influence the result.
+    """
+    for path in rule_files(root):
+        if path.name.endswith("-tests.yaml") or path.is_symlink():
+            continue
+        groups, err = load_groups(path)
+        if err:
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for rule in group.get("rules") or []:
+                if not isinstance(rule, dict):
+                    continue
+                expr = rule.get("expr")
+                if isinstance(expr, str):
+                    yield path, rule.get("alert") or rule.get("record"), expr
+
+
+def check_env_matchers(root: Path) -> list[str]:
+    findings: list[str] = []
+    for path, name, expr in iter_expressions(root):
+        rel = path.relative_to(root)
+        # finditer, not findall: the pattern has no capture group, so we want the
+        # whole matched text of each occurrence in order to compare them literally.
+        raw = [m.group(0) for m in ENV_ANY_RE.finditer(expr)]
+        if not raw:
+            continue
+
+        if len(set(raw)) > 1:
+            findings.append(
+                f"{rel}: {name}: deployment_environment matchers must be byte-identical "
+                f"within one expression; found {sorted(set(raw))}"
+            )
+
+        for occurrence in sorted(set(raw)):
+            canonical = ENV_CANONICAL_RE.fullmatch(occurrence)
+            if not canonical:
+                findings.append(
+                    f"{rel}: {name}: '{occurrence}' is not the canonical form. "
+                    f'Use deployment_environment=~"staging|prod": =~ only, double quotes, '
+                    f"no whitespace, no negation."
+                )
+                continue
+
+            values = canonical.group(1).split("|")
+            unknown = [v for v in values if v not in ENVIRONMENTS]
+            if unknown:
+                findings.append(
+                    f"{rel}: {name}: unknown environment(s) {unknown}; "
+                    f"known values are {', '.join(ENVIRONMENTS)}"
+                )
+                continue
+
+            if len(set(values)) != len(values):
+                findings.append(f"{rel}: {name}: duplicate environment values in '{occurrence}'")
+                continue
+
+            expected = [e for e in ENVIRONMENTS if e in values]
+            if values != expected:
+                findings.append(
+                    f"{rel}: {name}: environments must be in list order "
+                    f"({', '.join(ENVIRONMENTS)}); expected \"{'|'.join(expected)}\""
+                )
+
+    return findings
+
+
 CHECKS = {
     "layout": check_layout,
     "contract": check_contract,
+    "envmatcher": check_env_matchers,
 }
 
 

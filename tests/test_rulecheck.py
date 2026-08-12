@@ -204,3 +204,121 @@ def test_contract_skips_test_fixtures(tmp_path):
     write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml",
           "rule_files: [a-alerts.yaml]\ntests: []\n")
     assert rulecheck.check_contract(tmp_path) == []
+
+
+def expr_rule(expr: str) -> str:
+    return f"""\
+groups:
+  - name: g
+    rules:
+      - alert: PaymentsA
+        expr: {expr}
+        labels: {{severity: warning, owner: payments}}
+        annotations:
+          summary: A summary.
+          runbook_url: https://runbooks.internal/x
+"""
+
+
+def test_envmatcher_allows_no_matcher_at_all(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", expr_rule("up == 0"))
+    assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+def test_envmatcher_accepts_canonical_form(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment=~"staging|prod"} == 0'))
+    assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+def test_envmatcher_accepts_a_single_value(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment=~"prod"} == 0'))
+    assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+def test_envmatcher_rejects_plain_equals(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment="prod"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_negation(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment!="dev"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_whitespace_around_operator(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment =~ "prod"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_unknown_environment(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment=~"perf"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("perf" in f for f in findings)
+
+
+def test_envmatcher_rejects_out_of_order_values(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment=~"prod|staging"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("order" in f for f in findings)
+
+
+def test_envmatcher_rejects_duplicate_values(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment=~"prod|prod"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("duplicate" in f for f in findings)
+
+
+def test_envmatcher_rejects_inconsistent_occurrences(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", expr_rule(
+        'sum(up{deployment_environment=~"prod"}) / '
+        'sum(up{deployment_environment=~"staging|prod"})'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("identical" in f for f in findings)
+
+
+def test_envmatcher_rejects_single_quoted_matcher(tmp_path):
+    # PromQL accepts single quotes, so this is valid but non-canonical. If it
+    # slipped through, the environment set would stop being derivable.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule("up{deployment_environment='prod'} == 0"))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_backtick_matcher(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule("up{deployment_environment=`prod`} == 0"))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_ignores_a_longer_label_with_the_same_suffix(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{my_deployment_environment="prod"} == 0'))
+    assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+def test_envmatcher_ignores_matchers_in_annotations(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: PaymentsA
+        expr: up == 0
+        labels: {severity: warning, owner: payments}
+        annotations:
+          summary: 'Prose mentioning deployment_environment="prod" harmlessly.'
+          runbook_url: https://runbooks.internal/x
+""")
+    assert rulecheck.check_env_matchers(tmp_path) == []
