@@ -21,6 +21,7 @@ TARGETS = ("mimir", "loki", "prometheus")
 ENVIRONMENTS = ("dev", "staging", "prod")
 SEVERITIES = ("info", "warning", "error", "critical")
 PLATFORM_TEAM = "platform"
+PLATFORM_OWNER = f"@org/{PLATFORM_TEAM}"
 
 # Targets whose rules promtool can unit-test. Loki has no LogQL unit-test
 # command, so a fixture there would never run and must not be committed.
@@ -327,25 +328,33 @@ def team_folders(root: Path) -> set[str]:
     return teams
 
 
-def codeowners_entries(root: Path) -> tuple[set[str], set[str]]:
-    """Return (team names claimed under rules/ or dashboards/, all path patterns)."""
+def codeowners_entries(root: Path) -> tuple[set[str], dict[str, list[str]]]:
+    """Return (team names claimed under rules/ or dashboards/, pattern -> owners list).
+
+    For each pattern, the owners list contains all handles on that line.
+    If a pattern appears multiple times, last occurrence wins (GitHub semantics).
+    """
     path = root / ".github" / "CODEOWNERS"
     teams: set[str] = set()
-    patterns: set[str] = set()
+    pattern_to_owners: dict[str, list[str]] = {}
     if not path.is_file():
-        return teams, patterns
+        return teams, pattern_to_owners
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        pattern = line.split()[0]
-        patterns.add(pattern)
+        parts = line.split()
+        if not parts:
+            continue
+        pattern = parts[0]
+        owners = parts[1:]  # All tokens after the pattern are owner handles
+        pattern_to_owners[pattern] = owners  # Last occurrence wins
         for parent in ("/rules/", "/dashboards/"):
             if pattern.startswith(parent):
                 remainder = pattern[len(parent):].strip("/")
                 if remainder:
                     teams.add(remainder.split("/")[0])
-    return teams, patterns
+    return teams, pattern_to_owners
 
 
 def check_codeowners(root: Path) -> list[str]:
@@ -353,7 +362,7 @@ def check_codeowners(root: Path) -> list[str]:
     if not (root / ".github" / "CODEOWNERS").is_file():
         return [".github/CODEOWNERS is missing"]
 
-    owned_teams, patterns = codeowners_entries(root)
+    owned_teams, pattern_to_owners = codeowners_entries(root)
     actual_teams = team_folders(root)
 
     for team in sorted(actual_teams - owned_teams):
@@ -368,9 +377,15 @@ def check_codeowners(root: Path) -> list[str]:
         )
 
     for required in PLATFORM_OWNED_PATHS:
-        if required not in patterns:
+        owners = pattern_to_owners.get(required, [])
+        if not owners:
             findings.append(
                 f"CODEOWNERS must assign the platform team to '{required}', "
+                f"otherwise a team can approve changes to the checks that govern it"
+            )
+        elif PLATFORM_OWNER not in owners:
+            findings.append(
+                f"CODEOWNERS assigns '{required}' to {owners} but the platform team must own it; "
                 f"otherwise a team can approve changes to the checks that govern it"
             )
 

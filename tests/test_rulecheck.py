@@ -374,3 +374,15 @@ def test_codeowners_requires_platform_owned_paths(tmp_path):
     )
     findings = rulecheck.check_codeowners(tmp_path)
     assert any("templates/" in f for f in findings)
+
+
+def test_codeowners_rejects_a_governing_path_reassigned_to_another_team(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(
+        CODEOWNERS_HEADER
+        + "/rules/payments/ @org/payments\n/dashboards/payments/ @org/payments\n"
+        + "/scripts/ @org/payments\n"  # Reassign /scripts/ to another team
+    )
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("/scripts/" in f for f in findings)
