@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  HELM_VERSION: "v3.16.3"
+  PROMTOOL_VERSION: "3.1.0"
+  PROMRUVAL_VERSION: "3.2.0"
+  LOKITOOL_VERSION: "3.3.2"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0             # uid-change detection needs the base commit
+          persist-credentials: false # this job executes PR-controlled code, so it
+                                     # must not leave a usable token in .git/config
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      # Every download is checksum-verified. Pinning a version proves which URL
+      # was requested, not what arrived. Generate tools/checksums.txt once by
+      # downloading each artifact and recording `sha256sum <file>`; CI then fails
+      # if any of them ever changes underneath the pin.
+      - name: Install pinned tools
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 3 -o prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-amd64.tar.gz"
+          curl -sSfL --retry 3 -o promruval.tar.gz \
+            "https://github.com/fusakla/promruval/releases/download/v${PROMRUVAL_VERSION}/promruval_${PROMRUVAL_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL --retry 3 -o lokitool.zip \
+            "https://github.com/grafana/loki/releases/download/v${LOKITOOL_VERSION}/lokitool-linux-amd64.zip"
+          sha256sum --check --strict tools/checksums.txt
+          tar -xzf prometheus.tar.gz
+          sudo install "prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          tar -xzf promruval.tar.gz
+          sudo install promruval /usr/local/bin/promruval
+          unzip -q lokitool.zip
+          sudo install lokitool-linux-amd64 /usr/local/bin/lokitool
+
+      # One command, and the same one a contributor runs. `make check` depends on
+      # `test`, so pytest runs here too rather than as a separate step that could
+      # drift away from the local experience.
+      - name: make check
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: make check

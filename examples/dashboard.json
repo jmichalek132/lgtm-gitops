@@ -1,0 +1,20 @@
+{
+  "uid": "payments-example",
+  "title": "Payments: Example",
+  "tags": ["payments"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Request rate",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=\"checkout\"}[5m]))",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

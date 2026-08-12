@@ -1,0 +1,26 @@
+# A complete, contract-compliant example. Copy this as a starting point.
+groups:
+  - name: checkout-http
+    rules:
+      - alert: CheckoutHighErrorRate
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{
+            service_name="checkout",
+            http_response_status_code=~"5..",
+            deployment_environment=~"staging|prod"
+          }[5m]))
+          /
+          sum(rate(http_server_request_duration_seconds_count{
+            service_name="checkout",
+            deployment_environment=~"staging|prod"
+          }[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          owner: payments
+        annotations:
+          summary: >-
+            Checkout is returning more than 5% 5xx responses in
+            {{ $labels.deployment_environment }}.
+          runbook_url: https://runbooks.internal/payments/checkout-error-rate
+          dashboard_url: https://grafana.internal/d/payments-overview
