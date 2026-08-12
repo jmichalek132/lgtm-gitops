@@ -402,15 +402,18 @@ def dashboard_files(root: Path) -> list[Path]:
     return sorted(p for p in base.rglob("*.json") if p.is_file())
 
 
-def _uids_at_ref(root: Path, ref: str) -> dict[str, str]:
-    """Map relative path -> uid as of the given git ref. Missing files are skipped."""
+def _uids_at_ref(root: Path, ref: str) -> dict[str, str] | None:
+    """Map relative path -> uid as of the given git ref. Missing files are skipped.
+
+    Returns None if the base ref could not be resolved; {} if resolved but no dashboards.
+    """
     try:
         listing = subprocess.run(
             ["git", "-C", str(root), "ls-tree", "-r", "--name-only", ref, "dashboards/"],
             capture_output=True, text=True, check=True,
         ).stdout.split()
     except subprocess.CalledProcessError:
-        return {}
+        return None
 
     uids: dict[str, str] = {}
     for rel in listing:
@@ -421,11 +424,13 @@ def _uids_at_ref(root: Path, ref: str) -> dict[str, str]:
                 ["git", "-C", str(root), "show", f"{ref}:{rel}"],
                 capture_output=True, text=True, check=True,
             ).stdout
-            uid = json.loads(blob).get("uid")
-        except (subprocess.CalledProcessError, json.JSONDecodeError, AttributeError):
+            doc = json.loads(blob)
+            if isinstance(doc, dict):
+                uid = doc.get("uid")
+                if uid:
+                    uids[rel] = uid
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
             continue
-        if uid:
-            uids[rel] = uid
     return uids
 
 
@@ -446,6 +451,10 @@ def check_dashboards(root: Path, base_ref: str | None = None) -> list[str]:
             findings.append(f"{rel}: invalid JSON: {exc}")
             continue
 
+        if not isinstance(doc, dict):
+            findings.append(f"{rel}: dashboard JSON must be an object, got {type(doc).__name__}")
+            continue
+
         uid = doc.get("uid")
         if not uid:
             findings.append(f"{rel}: dashboard must declare a 'uid'")
@@ -453,23 +462,30 @@ def check_dashboards(root: Path, base_ref: str | None = None) -> list[str]:
 
         current[str(rel)] = uid
 
-        if uid in seen_uids and seen_uids[uid] != path:
+        if uid in seen_uids:
             findings.append(
                 f"{rel}: uid '{uid}' is not unique; also used by "
                 f"{seen_uids[uid].relative_to(root)}"
             )
         else:
-            seen_uids.setdefault(uid, path)
+            seen_uids[uid] = path
 
     if base_ref:
-        for rel, old_uid in _uids_at_ref(root, base_ref).items():
-            new_uid = current.get(rel)
-            if new_uid and new_uid != old_uid:
-                findings.append(
-                    f"{rel}: uid changed from '{old_uid}' to '{new_uid}'. This orphans the "
-                    f"live dashboard and breaks every link and annotation pointing at it. "
-                    f"If deliberate, say so explicitly in the pull request."
-                )
+        base_uids = _uids_at_ref(root, base_ref)
+        if base_uids is None:
+            findings.append(
+                f"base ref '{base_ref}' could not be resolved; uid-change detection did not run. "
+                f"CI needs full history (git clone without --depth) to detect dashboard uid changes."
+            )
+        else:
+            for rel, old_uid in base_uids.items():
+                new_uid = current.get(rel)
+                if new_uid and new_uid != old_uid:
+                    findings.append(
+                        f"{rel}: uid changed from '{old_uid}' to '{new_uid}'. This orphans the "
+                        f"live dashboard and breaks every link and annotation pointing at it. "
+                        f"If deliberate, say so explicitly in the pull request."
+                    )
 
     return findings
 

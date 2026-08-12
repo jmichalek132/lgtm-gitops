@@ -435,3 +435,18 @@ def test_dashboards_detects_a_changed_uid_against_the_base_ref(tmp_path):
     write(tmp_path, "dashboards/payments/overview.json", dash("changed-uid"))
     findings = rulecheck.check_dashboards(tmp_path, base_ref="HEAD")
     assert any("original-uid" in f for f in findings)
+
+
+def test_dashboards_rejects_non_object_json(tmp_path):
+    write(tmp_path, "dashboards/payments/overview.json", "[]")
+    findings = rulecheck.check_dashboards(tmp_path)
+    assert any("must be an object" in f for f in findings)
+
+
+def test_dashboards_reports_an_unresolvable_base_ref(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+    write(tmp_path, "dashboards/payments/overview.json", dash("some-uid"))
+    findings = rulecheck.check_dashboards(tmp_path, base_ref="nonexistent-ref")
+    assert any("could not be resolved" in f for f in findings)
