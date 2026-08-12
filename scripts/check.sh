@@ -41,19 +41,29 @@ if require promruval; then
   # Verified against the promruval README.
   collect < <(find rules \( -path 'rules/*/mimir/*' -o -path 'rules/*/prometheus/*' \) \
     -name '*.yaml' ! -name '*-tests.yaml' -print0 | sort -z)
-  [ "${#FILES[@]}" -gt 0 ] && \
+  if [ "${#FILES[@]}" -gt 0 ]; then
     run promruval validate --config-file=./validation.yaml --support-mimir "${FILES[@]}"
+  else
+    printf 'no mimir/prometheus rule files found\n'
+  fi
 
   collect < <(find rules -path 'rules/*/loki/*' -name '*.yaml' -print0 | sort -z)
-  [ "${#FILES[@]}" -gt 0 ] && \
+  if [ "${#FILES[@]}" -gt 0 ]; then
     run promruval validate --config-file=./validation.yaml --support-loki "${FILES[@]}"
+  else
+    printf 'no loki rule files found\n'
+  fi
 fi
 
 stage "4. syntax (promtool, lokitool)"
 if require promtool; then
   collect < <(find rules \( -path 'rules/*/mimir/*' -o -path 'rules/*/prometheus/*' \) \
     -name '*.yaml' ! -name '*-tests.yaml' -print0 | sort -z)
-  [ "${#FILES[@]}" -gt 0 ] && run promtool check rules "${FILES[@]}"
+  if [ "${#FILES[@]}" -gt 0 ]; then
+    run promtool check rules "${FILES[@]}"
+  else
+    printf 'no mimir/prometheus rule files found\n'
+  fi
 fi
 # lokitool is REQUIRED, not optional. Making it optional meant CI silently
 # skipped every LogQL syntax check, since it was never installed there.
@@ -62,11 +72,15 @@ if [ "${ALLOW_MISSING_LOKITOOL:-0}" = "1" ] && ! have lokitool; then
   printf 'WARNING: lokitool missing, LogQL syntax NOT checked (local override)\n' >&2
 elif require lokitool; then
   collect < <(find rules -path 'rules/*/loki/*' -name '*.yaml' -print0 | sort -z)
-  [ "${#FILES[@]}" -gt 0 ] && run lokitool rules check "${FILES[@]}"
+  if [ "${#FILES[@]}" -gt 0 ]; then
+    run lokitool rules check "${FILES[@]}"
+  else
+    printf 'no loki rule files found\n'
+  fi
 fi
 
 stage "5. unit tests (promtool test rules)"
-if have promtool; then
+if require promtool; then
   collect < <(find rules -name '*-tests.yaml' -print0 | sort -z)
   if [ "${#FILES[@]}" -eq 0 ]; then
     printf 'no test fixtures found\n'

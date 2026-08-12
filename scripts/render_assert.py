@@ -29,7 +29,7 @@ def render(target: str) -> list[dict]:
     )
     if out.returncode != 0:
         # A target with no rules legitimately fails closed; that is not an error here.
-        if "matched no rule files" in out.stderr:
+        if "matched no deployable rule files" in out.stderr:
             return []
         print(f"helm template failed for target={target}:\n{out.stderr}", file=sys.stderr)
         raise SystemExit(1)
