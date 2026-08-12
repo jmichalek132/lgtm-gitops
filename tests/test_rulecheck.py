@@ -68,3 +68,139 @@ def test_layout_rejects_a_symlink(tmp_path):
     link.symlink_to(real)
     findings = rulecheck.check_layout(tmp_path)
     assert any("symlink" in f.lower() for f in findings)
+
+
+ALERT = """\
+groups:
+  - name: g
+    rules:
+      - alert: {name}
+        expr: vector(1)
+        labels:
+          severity: {severity}
+          owner: {owner}
+        annotations:
+          summary: A summary.
+          runbook_url: https://runbooks.internal/x
+"""
+
+
+def test_contract_accepts_a_valid_alert(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          ALERT.format(name="PaymentsA", severity="warning", owner="payments"))
+    assert rulecheck.check_contract(tmp_path) == []
+
+
+def test_contract_rejects_owner_not_matching_folder(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          ALERT.format(name="PaymentsA", severity="warning", owner="platform"))
+    findings = rulecheck.check_contract(tmp_path)
+    assert any("owner" in f for f in findings)
+
+
+def test_contract_rejects_unknown_severity(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          ALERT.format(name="PaymentsA", severity="page", owner="payments"))
+    findings = rulecheck.check_contract(tmp_path)
+    assert any("severity" in f for f in findings)
+
+
+def test_contract_requires_a_summary(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: PaymentsA
+        expr: vector(1)
+        labels: {severity: warning, owner: payments}
+        annotations: {runbook_url: https://runbooks.internal/x}
+""")
+    findings = rulecheck.check_contract(tmp_path)
+    assert any("summary" in f for f in findings)
+
+
+def test_contract_accepts_description_as_a_summary_alias(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: PaymentsA
+        expr: vector(1)
+        labels: {severity: warning, owner: payments}
+        annotations:
+          description: Explained here instead.
+          runbook_url: https://runbooks.internal/x
+""")
+    assert rulecheck.check_contract(tmp_path) == []
+
+
+def test_contract_requires_a_url_annotation(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: PaymentsA
+        expr: vector(1)
+        labels: {severity: warning, owner: payments}
+        annotations: {summary: A summary.}
+""")
+    findings = rulecheck.check_contract(tmp_path)
+    assert any("runbook_url" in f for f in findings)
+
+
+def test_contract_rejects_duplicate_alert_names_across_teams(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          ALERT.format(name="SharedName", severity="warning", owner="payments"))
+    write(tmp_path, "rules/fraud/mimir/b-alerts.yaml",
+          ALERT.format(name="SharedName", severity="warning", owner="fraud"))
+    findings = rulecheck.check_contract(tmp_path)
+    assert any("SharedName" in f and "unique" in f for f in findings)
+
+
+def test_contract_rejects_duplicate_alert_names_within_one_file(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: SameName
+        expr: vector(1)
+        labels: {severity: warning, owner: payments}
+        annotations: {summary: One., runbook_url: https://runbooks.internal/x}
+      - alert: SameName
+        expr: vector(2)
+        labels: {severity: warning, owner: payments}
+        annotations: {summary: Two., runbook_url: https://runbooks.internal/x}
+""")
+    findings = rulecheck.check_contract(tmp_path)
+    assert any("SameName" in f and "unique" in f for f in findings)
+
+
+def test_contract_survives_malformed_labels(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: PaymentsA
+        expr: vector(1)
+        labels: "not-a-mapping"
+        annotations: {summary: S., runbook_url: https://runbooks.internal/x}
+""")
+    findings = rulecheck.check_contract(tmp_path)  # must not raise
+    assert any("severity" in f for f in findings)
+
+
+def test_contract_ignores_recording_rules(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-rules.yaml", """\
+groups:
+  - name: g
+    rules:
+      - record: job:x:sum
+        expr: sum(x)
+""")
+    assert rulecheck.check_contract(tmp_path) == []
+
+
+def test_contract_skips_test_fixtures(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml",
+          "rule_files: [a-alerts.yaml]\ntests: []\n")
+    assert rulecheck.check_contract(tmp_path) == []

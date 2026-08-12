@@ -118,8 +118,105 @@ def check_layout(root: Path) -> list[str]:
     return findings
 
 
+import yaml
+
+SUMMARY_ALIASES = ("summary", "message", "description")
+URL_ANNOTATIONS = ("runbook_url", "dashboard_url")
+
+
+def load_groups(path: Path) -> tuple[list[dict], str | None]:
+    """Return (groups, error). Malformed YAML yields ([], message)."""
+    try:
+        doc = yaml.safe_load(path.read_text()) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return [], f"unreadable or unparseable YAML: {exc}"
+    if not isinstance(doc, dict):
+        return [], "expected a mapping at the document root"
+    groups = doc.get("groups") or []
+    if not isinstance(groups, list):
+        return [], "'groups' must be a list"
+    return groups, None
+
+
+def iter_alerts(root: Path):
+    """Yield (path, alert_dict) for every alerting rule, skipping fixtures."""
+    for path in rule_files(root):
+        if path.name.endswith("-tests.yaml") or path.is_symlink():
+            continue
+        groups, err = load_groups(path)
+        if err:
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for rule in group.get("rules") or []:
+                if isinstance(rule, dict) and "alert" in rule:
+                    yield path, rule
+
+
+def check_contract(root: Path) -> list[str]:
+    findings: list[str] = []
+    seen_names: dict[str, Path] = {}
+
+    for path in rule_files(root):
+        if path.name.endswith("-tests.yaml") or path.is_symlink():
+            continue
+        _, err = load_groups(path)
+        if err:
+            findings.append(f"{path.relative_to(root)}: {err}")
+
+    for path, alert in iter_alerts(root):
+        rel = path.relative_to(root)
+        name = alert.get("alert")
+        parts = path.relative_to(root / "rules").parts
+        team = parts[0] if parts else "?"
+
+        # A rule whose labels/annotations are a string or list is malformed, but
+        # it must produce a finding rather than an AttributeError traceback.
+        labels = alert.get("labels")
+        labels = labels if isinstance(labels, dict) else {}
+        annotations = alert.get("annotations")
+        annotations = annotations if isinstance(annotations, dict) else {}
+
+        severity = labels.get("severity")
+        if severity not in SEVERITIES:
+            findings.append(
+                f"{rel}: alert {name}: severity '{severity}' must be one of {', '.join(SEVERITIES)}"
+            )
+
+        owner = labels.get("owner")
+        if owner != team:
+            findings.append(
+                f"{rel}: alert {name}: owner label is '{owner}' but the team folder is '{team}'"
+            )
+
+        if not any(annotations.get(a) for a in SUMMARY_ALIASES):
+            findings.append(
+                f"{rel}: alert {name}: needs one of {', '.join(SUMMARY_ALIASES)}"
+            )
+
+        if not any(annotations.get(a) for a in URL_ANNOTATIONS):
+            findings.append(
+                f"{rel}: alert {name}: needs one of {', '.join(URL_ANNOTATIONS)}"
+            )
+
+        # No `!= path` guard: two alerts sharing a name inside ONE file are just
+        # as indistinguishable to Alertmanager as two in different files.
+        if name in seen_names:
+            findings.append(
+                f"{rel}: alert name '{name}' is not unique; also defined in "
+                f"{seen_names[name].relative_to(root)}. Alerts carry no namespace label, "
+                f"so duplicates are indistinguishable to Alertmanager."
+            )
+        else:
+            seen_names[name] = path
+
+    return findings
+
+
 CHECKS = {
     "layout": check_layout,
+    "contract": check_contract,
 }
 
 
