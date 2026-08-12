@@ -21,7 +21,7 @@ require() {
   fi
 }
 
-stage "1-2. structure, contract, environment matchers, CODEOWNERS, dashboards"
+stage "1-2. structure, contract, fixtures, environment matchers, CODEOWNERS, dashboards"
 require python3 && run python3 scripts/rulecheck.py .
 
 # macOS ships bash 3.2, which has no `mapfile`. This keeps the script working
