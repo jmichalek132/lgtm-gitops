@@ -305,10 +305,83 @@ def check_env_matchers(root: Path) -> list[str]:
     return findings
 
 
+# Paths that govern the checks themselves. If a team could approve changes to
+# these, the contract would be self-modifiable.
+PLATFORM_OWNED_PATHS = (
+    "/Chart.yaml",
+    "/values.yaml",
+    "/values.schema.json",
+    "/templates/",
+    "/validation.yaml",
+    "/scripts/",
+    "/.github/",
+)
+
+
+def team_folders(root: Path) -> set[str]:
+    teams: set[str] = set()
+    for parent in ("rules", "dashboards"):
+        base = root / parent
+        if base.is_dir():
+            teams |= {d.name for d in base.iterdir() if d.is_dir()}
+    return teams
+
+
+def codeowners_entries(root: Path) -> tuple[set[str], set[str]]:
+    """Return (team names claimed under rules/ or dashboards/, all path patterns)."""
+    path = root / ".github" / "CODEOWNERS"
+    teams: set[str] = set()
+    patterns: set[str] = set()
+    if not path.is_file():
+        return teams, patterns
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        pattern = line.split()[0]
+        patterns.add(pattern)
+        for parent in ("/rules/", "/dashboards/"):
+            if pattern.startswith(parent):
+                remainder = pattern[len(parent):].strip("/")
+                if remainder:
+                    teams.add(remainder.split("/")[0])
+    return teams, patterns
+
+
+def check_codeowners(root: Path) -> list[str]:
+    findings: list[str] = []
+    if not (root / ".github" / "CODEOWNERS").is_file():
+        return [".github/CODEOWNERS is missing"]
+
+    owned_teams, patterns = codeowners_entries(root)
+    actual_teams = team_folders(root)
+
+    for team in sorted(actual_teams - owned_teams):
+        findings.append(
+            f"team '{team}' has folders but no CODEOWNERS entry; "
+            f"add '/rules/{team}/ @org/{team}'"
+        )
+
+    for team in sorted(owned_teams - actual_teams):
+        findings.append(
+            f"CODEOWNERS claims team '{team}' but no rules/ or dashboards/ folder exists"
+        )
+
+    for required in PLATFORM_OWNED_PATHS:
+        if required not in patterns:
+            findings.append(
+                f"CODEOWNERS must assign the platform team to '{required}', "
+                f"otherwise a team can approve changes to the checks that govern it"
+            )
+
+    return findings
+
+
 CHECKS = {
     "layout": check_layout,
     "contract": check_contract,
     "envmatcher": check_env_matchers,
+    "codeowners": check_codeowners,
 }
 
 

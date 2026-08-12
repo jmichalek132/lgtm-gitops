@@ -322,3 +322,55 @@ groups:
           runbook_url: https://runbooks.internal/x
 """)
     assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+CODEOWNERS_HEADER = """\
+* @org/platform
+/Chart.yaml @org/platform
+/values.yaml @org/platform
+/values.schema.json @org/platform
+/templates/ @org/platform
+/validation.yaml @org/platform
+/scripts/ @org/platform
+/.github/ @org/platform
+"""
+
+
+def test_codeowners_accepts_matching_sets(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    write(tmp_path, "dashboards/payments/overview.json", "{}")
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(
+        CODEOWNERS_HEADER
+        + "/rules/payments/ @org/payments\n/dashboards/payments/ @org/payments\n"
+    )
+    assert rulecheck.check_codeowners(tmp_path) == []
+
+
+def test_codeowners_flags_a_team_folder_with_no_entry(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(CODEOWNERS_HEADER)
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("payments" in f and "no CODEOWNERS" in f for f in findings)
+
+
+def test_codeowners_flags_an_entry_with_no_folder(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(
+        CODEOWNERS_HEADER
+        + "/rules/payments/ @org/payments\n/rules/ghost/ @org/ghost\n"
+    )
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("ghost" in f for f in findings)
+
+
+def test_codeowners_requires_platform_owned_paths(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(
+        "/rules/payments/ @org/payments\n"
+    )
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("templates/" in f for f in findings)

@@ -1,0 +1,17 @@
+# Default owner for anything not matched below.
+* @org/platform
+
+# Paths that govern the checks themselves. A team must not be able to approve
+# changes to the contract that governs its own changes, so these stay with the
+# platform team regardless of who is editing rules.
+/Chart.yaml @org/platform
+/values.yaml @org/platform
+/values.schema.json @org/platform
+/templates/ @org/platform
+/validation.yaml @org/platform
+/scripts/ @org/platform
+/.github/ @org/platform
+
+# Per-team ownership. One entry covers a team's rules and its dashboards.
+/rules/platform/ @org/platform
+/dashboards/platform/ @org/platform
