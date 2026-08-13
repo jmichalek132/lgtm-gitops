@@ -6,6 +6,35 @@ chart, the checks and CI.
 
 Design: [`docs/superpowers/specs/2026-08-10-observability-rules-design.md`](docs/superpowers/specs/2026-08-10-observability-rules-design.md)
 
+## First: configure ownership
+
+**This repository ships unconfigured and, as shipped, enforces nothing.** Every
+handle in `.github/CODEOWNERS` is under `@org`, a placeholder organisation that
+does not exist on GitHub. GitHub silently ignores an owner it cannot resolve, so
+a rule naming a non-existent team means **nobody** is required to review, while
+`scripts/rulecheck.py` treats the same string as authoritative. `make check`
+prints an `UNCONFIGURED` warning on every run until this is done.
+
+1. Set `org` in [`ownership.yaml`](ownership.yaml) to your GitHub organisation,
+   including the leading `@`.
+2. Replace every `@org/...` handle in `.github/CODEOWNERS` to match, and create
+   the teams on GitHub: `<org>/platform`, plus one team per folder under
+   `rules/` and `dashboards/`.
+3. Set `configured: true` in `ownership.yaml`.
+
+`make check` **fails** if you set `configured: true` while `org` is still the
+placeholder, or while any `@org/...` handle is left in CODEOWNERS. Claiming an
+ownership you do not have is the one state these checks refuse.
+
+Ownership rules that follow, all enforced by `make check`:
+
+- a team owns its own `rules/<team>/` **and** its own `dashboards/<team>/`;
+  both entries are required, and the two are one ownership boundary
+- the owning team must be the **sole** owner of them, because on GitHub any
+  co-owner can approve alone
+- the paths that govern the checks themselves (`scripts/`, `tests/`, `tools/`,
+  `templates/`, `Makefile`, `ownership.yaml`, …) stay with the platform team
+
 ## Adding an alert
 
 1. Put the file at `rules/<your-team>/<target>/<service>[-<type>]-alerts.yaml`,

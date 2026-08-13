@@ -1,3 +1,8 @@
+# Every '@org/...' handle here is a PLACEHOLDER. '@org' is not a real GitHub
+# organisation, and GitHub silently ignores an owner it cannot resolve, so as
+# shipped this file requires review from nobody. Point ownership.yaml at your
+# organisation and replace every handle below before relying on it.
+
 # Default owner for anything not matched below.
 * @org/platform
 
@@ -19,7 +24,12 @@
 /Makefile @org/platform
 /requirements.txt @org/platform
 /.github/ @org/platform
+# ownership.yaml names the organisation every other entry is checked against, so
+# a team able to edit it could redirect ownership of everything.
+/ownership.yaml @org/platform
 
-# Per-team ownership. One entry covers a team's rules and its dashboards.
+# Per-team ownership. A team owns its own rules AND its own dashboards, and it
+# owns them alone: on GitHub any co-owner can approve by itself. Both entries
+# are required for every team, and rulecheck.py fails the build without them.
 /rules/platform/ @org/platform
 /dashboards/platform/ @org/platform

@@ -1,0 +1,22 @@
+# Who owns this repository, and therefore what CODEOWNERS is checked against.
+#
+# THIS FILE SHIPS UNCONFIGURED, ON PURPOSE. '@org' below is a placeholder that
+# does not exist on GitHub, and GitHub SILENTLY IGNORES an owner it cannot
+# resolve: a CODEOWNERS line naming a team that does not exist means NOBODY is
+# required to review that path. Until `org` names a real organisation, this
+# repository governs nothing, however green `make check` is. `make check` says
+# so on every run while `configured` is false.
+#
+# To configure:
+#   1. set `org` to your GitHub organisation, including the leading '@'
+#   2. replace every '@org/...' handle in .github/CODEOWNERS to match, and
+#      create the teams (`<org>/platform` plus one team per folder under
+#      rules/ and dashboards/) so GitHub can actually resolve them
+#   3. set `configured` to true
+#
+# Setting `configured: true` while `org` is still the placeholder FAILS the
+# build, as does leaving any '@org/...' handle behind in CODEOWNERS. Claiming
+# to be configured while naming an owner that cannot exist is the one state
+# this file exists to prevent.
+configured: false
+org: "@org"

@@ -11,6 +11,11 @@ STATUS=0
 stage() { printf '\n=== %s ===\n' "$1"; }
 run()   { "$@" || STATUS=1; }
 
+# Standing facts about this repository that a green run does not make go away.
+# Printed immediately before the final status so they cannot scroll past.
+NOTES=()
+note() { NOTES+=("$1"); }
+
 have() { command -v "$1" >/dev/null 2>&1; }
 
 require() {
@@ -21,8 +26,19 @@ require() {
   fi
 }
 
-stage "1-2. structure, contract, fixtures, environment matchers, CODEOWNERS, dashboards"
-require python3 && run python3 scripts/rulecheck.py .
+stage "1-2. structure, contract, fixtures, environment matchers, ownership, CODEOWNERS, dashboards"
+# Exit 3 is rulecheck's "everything passed, but this repository still ships the
+# placeholder organisation and therefore enforces nothing on GitHub". That is not
+# a build failure (an unadopted example is entitled to say so), but it must not
+# scroll past either, so it is carried to the end as a note.
+if require python3; then
+  python3 scripts/rulecheck.py .
+  case "$?" in
+    0) ;;
+    3) note 'ownership is UNCONFIGURED (ownership.yaml: configured: false). CODEOWNERS names a placeholder organisation, so GitHub requires review from nobody on any path in this repository.' ;;
+    *) STATUS=1 ;;
+  esac
+fi
 
 # macOS ships bash 3.2, which has no `mapfile`. This keeps the script working
 # with the system bash so `make check` behaves identically everywhere.
@@ -100,6 +116,11 @@ stage "6. render (helm template) and Kubernetes constraints"
 if require helm; then
   run ./tests/chart_test.sh
   run python3 scripts/render_assert.py
+fi
+
+if [ "${#NOTES[@]}" -gt 0 ]; then
+  printf '\n'
+  for n in "${NOTES[@]}"; do printf 'NOTE: %s\n' "$n"; done
 fi
 
 if [ "$STATUS" -eq 0 ]; then

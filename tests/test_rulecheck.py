@@ -808,3 +808,106 @@ def test_dashboards_reports_an_unresolvable_base_ref(tmp_path):
     write(tmp_path, "dashboards/payments/overview.json", dash("some-uid"))
     findings = rulecheck.check_dashboards(tmp_path, base_ref="nonexistent-ref")
     assert any("could not be resolved" in f for f in findings)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def ownership(tmp_path, body: str) -> None:
+    (tmp_path / rulecheck.OWNERSHIP_FILE).write_text(body)
+
+
+CONFIGURED = 'configured: true\norg: "@acme"\n'
+UNCONFIGURED = 'configured: false\norg: "@org"\n'
+
+
+def test_ownership_accepts_a_configured_org(tmp_path):
+    ownership(tmp_path, CONFIGURED)
+    assert rulecheck.check_ownership(tmp_path) == []
+    assert rulecheck.ownership_warnings(tmp_path) == []
+
+
+def test_ownership_rejects_configured_true_with_the_shipped_placeholder(tmp_path):
+    # The whole point: '@org/platform' does not exist on GitHub, GitHub silently
+    # ignores unknown owners, so claiming to be configured while still naming the
+    # placeholder means nobody reviews anything.
+    ownership(tmp_path, 'configured: true\norg: "@org"\n')
+    findings = rulecheck.check_ownership(tmp_path)
+    assert any("placeholder" in f for f in findings)
+
+
+def test_ownership_warns_but_does_not_fail_when_unconfigured(tmp_path):
+    # An example repository openly declaring itself unconfigured is honest; it
+    # must still say loudly that it governs nothing.
+    ownership(tmp_path, UNCONFIGURED)
+    assert rulecheck.check_ownership(tmp_path) == []
+    warnings = rulecheck.ownership_warnings(tmp_path)
+    assert any("UNCONFIGURED" in w for w in warnings)
+
+
+def test_ownership_rejects_a_missing_file(tmp_path):
+    findings = rulecheck.check_ownership(tmp_path)
+    assert any(rulecheck.OWNERSHIP_FILE in f for f in findings)
+
+
+def test_ownership_rejects_a_non_boolean_configured(tmp_path):
+    # 'configured: maybe' must not be read as truthy or as false; either way the
+    # repository's own declaration is unreadable.
+    ownership(tmp_path, 'configured: maybe\norg: "@acme"\n')
+    findings = rulecheck.check_ownership(tmp_path)
+    assert any("configured" in f for f in findings)
+
+
+def test_ownership_rejects_an_org_without_an_at_sign(tmp_path):
+    ownership(tmp_path, 'configured: true\norg: "acme"\n')
+    findings = rulecheck.check_ownership(tmp_path)
+    assert any("org" in f for f in findings)
+
+
+def test_ownership_rejects_an_org_containing_a_team(tmp_path):
+    # 'org' names the organisation only; the team is appended per folder.
+    ownership(tmp_path, 'configured: true\norg: "@acme/platform"\n')
+    findings = rulecheck.check_ownership(tmp_path)
+    assert any("org" in f for f in findings)
+
+
+def test_ownership_rejects_unparseable_yaml(tmp_path):
+    ownership(tmp_path, "configured: [\n")
+    assert rulecheck.check_ownership(tmp_path) != []
+
+
+def test_ownership_rejects_placeholder_handles_left_in_codeowners(tmp_path):
+    # Half-migrated is the dangerous state: configured says yes, but the file
+    # GitHub actually reads still names the organisation that does not exist.
+    ownership(tmp_path, CONFIGURED)
+    codeowners(tmp_path, "* @acme/platform\n/scripts/ @org/platform\n")
+    findings = rulecheck.check_ownership(tmp_path)
+    assert any("@org/platform" in f for f in findings)
+
+
+def test_codeowners_enforces_the_configured_org(tmp_path):
+    # Once configured, '@org/payments' is just another wrong owner.
+    governed_repo(tmp_path)
+    ownership(tmp_path, CONFIGURED)
+    codeowners(tmp_path, CODEOWNERS_HEADER.replace("@org/", "@acme/")
+               + "/rules/payments/ @org/payments\n/dashboards/payments/ @acme/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("rules/payments" in f and "@acme/payments" in f for f in findings)
+
+
+def test_codeowners_accepts_a_fully_configured_org(tmp_path):
+    governed_repo(tmp_path)
+    ownership(tmp_path, CONFIGURED)
+    codeowners(tmp_path, CODEOWNERS_HEADER.replace("@org/", "@acme/")
+               + "/rules/payments/ @acme/payments\n/dashboards/payments/ @acme/payments\n")
+    assert rulecheck.check_codeowners(tmp_path) == []
+
+
+def test_ownership_file_is_itself_platform_owned(tmp_path):
+    # It decides which handle every other ownership check enforces, so a team
+    # that could edit it could redirect ownership of everything.
+    assert f"/{rulecheck.OWNERSHIP_FILE}" in rulecheck.PLATFORM_OWNED_PATHS
+
+
+def test_shipped_repository_has_no_ownership_failures():
+    assert rulecheck.check_ownership(REPO_ROOT) == []

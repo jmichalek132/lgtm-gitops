@@ -26,9 +26,19 @@ ENVIRONMENTS = ("dev", "staging", "prod")
 SEVERITIES = ("info", "warning", "error", "critical")
 PLATFORM_TEAM = "platform"
 
-# The GitHub organisation whose teams own paths here. Shipped as a placeholder
-# on purpose; see check_ownership and ownership.yaml.
-OWNERS_ORG = "@org"
+# The organisation whose teams own paths here is CONFIGURATION, not a constant:
+# this repository is published as a reusable example, so a real GitHub handle
+# baked into the validator would be wrong for everyone who adopts it. It is read
+# from ownership.yaml; '@org' is the shipped placeholder and the fallback used
+# when that file cannot be read.
+OWNERSHIP_FILE = "ownership.yaml"
+PLACEHOLDER_OWNERS_ORG = "@org"
+OWNERS_ORG = PLACEHOLDER_OWNERS_ORG
+
+# Exit code for "every check passed, but this is still the shipped, unconfigured
+# example, which enforces nothing on GitHub". Distinct from 1 so check.sh can say
+# so without failing a build that has no defect in it.
+EXIT_UNCONFIGURED = 3
 
 
 def team_owner(team: str, org: str = OWNERS_ORG) -> str:
@@ -393,7 +403,128 @@ PLATFORM_OWNED_PATHS = (
     "/Makefile",
     "/requirements.txt",
     "/.github/",
+    f"/{OWNERSHIP_FILE}",
 )
+
+
+ORG_HANDLE_RE = re.compile(r"^@[A-Za-z0-9][A-Za-z0-9-]*$")
+
+
+def load_ownership(root: Path) -> tuple[str, bool, list[str]]:
+    """Read ownership.yaml. Returns (org, configured, errors).
+
+    On any error the org falls back to the shipped placeholder and configured to
+    False, so every other check keeps running and reports against the placeholder
+    rather than silently trusting a half-read file. The errors are reported by
+    check_ownership, which is the one place that decides whether they fail a build.
+    """
+    path = root / OWNERSHIP_FILE
+    if not path.is_file():
+        return PLACEHOLDER_OWNERS_ORG, False, [
+            f"{OWNERSHIP_FILE} is missing. It declares which GitHub organisation "
+            f"owns this repository, and without it the ownership checks have "
+            f"nothing to check CODEOWNERS against"
+        ]
+
+    try:
+        doc = yaml.safe_load(path.read_text()) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return PLACEHOLDER_OWNERS_ORG, False, [f"{OWNERSHIP_FILE}: unreadable or unparseable YAML: {exc}"]
+    if not isinstance(doc, dict):
+        return PLACEHOLDER_OWNERS_ORG, False, [f"{OWNERSHIP_FILE}: expected a mapping at the document root"]
+
+    errors: list[str] = []
+
+    org = doc.get("org")
+    if not isinstance(org, str) or not ORG_HANDLE_RE.match(org):
+        errors.append(
+            f"{OWNERSHIP_FILE}: 'org' must be a GitHub organisation handle such as "
+            f"'@acme': a leading '@', no team suffix and no slash, since the team "
+            f"name is appended per folder. Got {org!r}"
+        )
+        org = PLACEHOLDER_OWNERS_ORG
+
+    configured = doc.get("configured")
+    if not isinstance(configured, bool):
+        errors.append(
+            f"{OWNERSHIP_FILE}: 'configured' must be true or false, got {configured!r}. "
+            f"Whether this repository actually governs anything is not something to "
+            f"be inferred from a truthy value"
+        )
+        configured = False
+
+    return org, configured, errors
+
+
+def check_ownership(root: Path) -> list[str]:
+    """Fail when the repository claims an ownership it does not have.
+
+    '@org/platform' does not exist on GitHub. GitHub silently ignores an owner it
+    cannot resolve, so a CODEOWNERS naming it means NOBODY is required to review,
+    while every check here treats the same string as authoritative. That gap is
+    the bug. It is closed by making the org configuration and then refusing two
+    states: a repository that says it is configured while still naming the
+    placeholder, and one whose CODEOWNERS still carries placeholder handles.
+
+    Shipping unconfigured is NOT one of those states. A published example that
+    openly declares `configured: false` is telling the truth, and it is warned
+    about loudly on every run (see ownership_warnings) rather than failed.
+    """
+    org, configured, findings = load_ownership(root)
+    if not configured:
+        return findings
+
+    if org == PLACEHOLDER_OWNERS_ORG:
+        # The stale-handle check below would compare the placeholder against
+        # itself and print nonsense, and this finding already says everything.
+        findings.append(
+            f"{OWNERSHIP_FILE} says configured: true but 'org' is still the shipped "
+            f"placeholder '{PLACEHOLDER_OWNERS_ORG}', which is not a real GitHub "
+            f"organisation. GitHub silently ignores owners it cannot resolve, so "
+            f"every CODEOWNERS rule here would require review from nobody. Point "
+            f"this repository at a real organisation before it governs anything"
+        )
+        return findings
+
+    stale = sorted(
+        {
+            owner
+            for _pattern, owners in codeowners_entries(root)[1]
+            for owner in owners
+            if owner.startswith(f"{PLACEHOLDER_OWNERS_ORG}/")
+        }
+    )
+    if stale:
+        findings.append(
+            f".github/CODEOWNERS still names the placeholder organisation: {stale}. "
+            f"{OWNERSHIP_FILE} says this repository is configured as '{org}', so these "
+            f"handles resolve to nobody on GitHub and the paths they name are "
+            f"unreviewed. Replace every '{PLACEHOLDER_OWNERS_ORG}/' handle with '{org}/'"
+        )
+
+    return findings
+
+
+def ownership_warnings(root: Path) -> list[str]:
+    """Warnings for the shipped, unconfigured state. Not build failures.
+
+    Kept separate from check_ownership because the two say different things. A
+    finding means the repository is lying about what it enforces; this means it
+    is honestly enforcing nothing yet, which is the correct state for an example
+    nobody has adopted, and the wrong state for one governing production.
+    """
+    org, configured, errors = load_ownership(root)
+    if errors or configured:
+        return []
+    return [
+        f"UNCONFIGURED: {OWNERSHIP_FILE} says configured: false, so this repository "
+        f"is the shipped example. '{org}/...' is a placeholder organisation that does "
+        f"not exist on GitHub, and GitHub silently ignores owners it cannot resolve, "
+        f"so NO review is actually required for ANY path here. The ownership checks "
+        f"verify that CODEOWNERS is internally consistent; they cannot make GitHub "
+        f"enforce it. Set a real organisation in {OWNERSHIP_FILE} before this "
+        f"repository governs anything."
+    ]
 
 
 def team_folders(root: Path) -> set[str]:
@@ -577,7 +708,9 @@ def check_codeowners(root: Path) -> list[str]:
     if not (root / ".github" / "CODEOWNERS").is_file():
         return [".github/CODEOWNERS is missing"]
 
-    org = OWNERS_ORG
+    # The org is configuration; a repository pointed at a real organisation must
+    # be checked against that one, not against the shipped placeholder.
+    org, _configured, _errors = load_ownership(root)
     owned_teams, entries = codeowners_entries(root)
     actual_teams = team_folders(root)
 
@@ -606,6 +739,7 @@ def check_codeowners(root: Path) -> list[str]:
             continue
         compiled.append((pattern, owners, regex))
 
+    platform_owner = team_owner(PLATFORM_TEAM, org)
     patterns = [pattern for pattern, _ in entries]
     for entry in PLATFORM_OWNED_PATHS:
         for probe in governed_probe_paths(root, entry, patterns):
@@ -618,22 +752,22 @@ def check_codeowners(root: Path) -> list[str]:
                 )
                 continue
             pattern, owners = winner
-            if PLATFORM_OWNER not in owners:
+            if platform_owner not in owners:
                 findings.append(
                     f"CODEOWNERS gives '{probe}' (governed by '{entry}') to "
                     f"{owners or 'nobody'} through pattern '{pattern}', which is the last "
                     f"pattern matching it and therefore the one GitHub applies. "
-                    f"{PLATFORM_OWNER} must own it, otherwise a team can approve changes "
+                    f"{platform_owner} must own it, otherwise a team can approve changes "
                     f"to the checks that govern it"
                 )
-            elif set(owners) != {PLATFORM_OWNER}:
-                extra = sorted(set(owners) - {PLATFORM_OWNER})
+            elif set(owners) != {platform_owner}:
+                extra = sorted(set(owners) - {platform_owner})
                 findings.append(
                     f"CODEOWNERS gives '{probe}' (governed by '{entry}') to "
-                    f"{PLATFORM_OWNER} AND {extra} through pattern '{pattern}'. On "
+                    f"{platform_owner} AND {extra} through pattern '{pattern}'. On "
                     f"GitHub any co-owner can approve alone, so {extra} can still "
                     f"approve changes to the checks that govern it; "
-                    f"{PLATFORM_OWNER} must be the sole owner"
+                    f"{platform_owner} must be the sole owner"
                 )
 
     # A team's rules and its dashboards are ONE ownership boundary, and it is the
@@ -782,6 +916,7 @@ CHECKS = {
     "contract": check_contract,
     "fixtures": check_fixtures,
     "envmatcher": check_env_matchers,
+    "ownership": check_ownership,
     "codeowners": check_codeowners,
     "dashboards": check_dashboards,
 }
@@ -803,7 +938,14 @@ def main(argv: list[str]) -> int:
                 print(f"  {f}", file=sys.stderr)
         else:
             print(f"[{name}] ok")
-    return 1 if failed else 0
+
+    warnings = ownership_warnings(root)
+    for w in warnings:
+        print(f"[ownership] WARNING: {w}", file=sys.stderr)
+
+    if failed:
+        return 1
+    return EXIT_UNCONFIGURED if warnings else 0
 
 
 if __name__ == "__main__":
