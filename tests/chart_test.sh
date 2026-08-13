@@ -19,7 +19,12 @@ assert_contains "$OUT" 'k8s-sidecar-target-directory: "platform"' \
 assert_contains "$OUT" 'observability-rules/source-path: "rules/platform/mimir/deadman-alerts.yaml"' \
   "source-path annotation records the origin"
 assert_contains "$OUT" "ObservabilityRulesMimirDeadman" "rule body is embedded"
-assert_count "$OUT" "kind: ConfigMap" 1 "exactly one ConfigMap rendered"
+# Counting ConfigMaps across the WHOLE render asserted that this repository
+# contains exactly one mimir rule file, so the first team to add a second alert
+# broke the build, which is the repository's entire reason to exist. What the
+# assertion is for is that one rule file yields one ConfigMap, so count that.
+assert_count "$OUT" "name: platform-platform-mimir-deadman-alerts" 1 \
+  "deadman rule renders exactly one ConfigMap"
 
 echo "chart: fail-closed guards"
 
