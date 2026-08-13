@@ -34,7 +34,12 @@ def run_check(env_path: str | None = None) -> subprocess.CompletedProcess:
 def test_check_sh_passes_and_actually_discovers_rules():
     proc = run_check()
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "all checks passed" in proc.stdout
+    # This repository ships with ownership.yaml: configured: false, so a clean
+    # run is not "all checks passed": it is the CAVEATS variant that says so
+    # explicitly and refuses to call an unconfigured repository a clean bill
+    # of health. "all checks passed" is asserted absent on purpose.
+    assert "CHECKS INCOMPLETE" in proc.stdout
+    assert "all checks passed" not in proc.stdout
     for message in EMPTY_DISCOVERY:
         assert message not in proc.stdout, (
             f"{message!r}: a stage found no files in a repository that has them, "

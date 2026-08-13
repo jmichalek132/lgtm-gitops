@@ -36,12 +36,13 @@ stage "1-2. structure, contract, fixtures, environment matchers, ownership, CODE
 # Exit 3 is rulecheck's "everything passed, but this repository still ships the
 # placeholder organisation and therefore enforces nothing on GitHub". That is not
 # a build failure (an unadopted example is entitled to say so), but it must not
-# scroll past either, so it is carried to the end as a note.
+# scroll past either, so it is carried to the end as a caveat: this run did not
+# verify that GitHub enforces anything, so it cannot claim a clean bill of health.
 if require python3; then
   python3 scripts/rulecheck.py .
   case "$?" in
     0) ;;
-    3) note 'ownership is UNCONFIGURED (ownership.yaml: configured: false). CODEOWNERS names a placeholder organisation, so GitHub requires review from nobody on any path in this repository.' ;;
+    3) caveat 'ownership is UNCONFIGURED (ownership.yaml: configured: false). CODEOWNERS names a placeholder organisation, so GitHub requires review from nobody on any path in this repository.' ;;
     *) STATUS=1 ;;
   esac
 fi
