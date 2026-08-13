@@ -42,6 +42,30 @@ assert_count() {
   fi
 }
 
+# Captures the stdout of a command that MUST succeed, into $RENDER_OUT.
+#
+# `OUT=$(helm template ...)` alone conflates failure with empty output. A helm
+# exiting 42 yields an empty OUT, and an assert_not_contains against empty output
+# then passes for entirely the wrong reason: the test reports ok having rendered
+# nothing. Verified with a shim returning 42, which still gave "22 passed, 0
+# failed".
+#
+# The assignment happens in THIS shell (only the substitution is a subshell), so
+# the failure counter survives. A helper returning the text on stdout could not
+# do that, because the caller's $(...) would swallow the count.
+RENDER_OUT=""
+render() {
+  local name="$1"; shift
+  local status
+  RENDER_OUT=$("$@" 2>&1) && status=0 || status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "$name" "command exited $status: $*"
+    printf '%s\n' "$RENDER_OUT" | sed 's/^/       /'
+    return 1
+  fi
+  pass "$name"
+}
+
 # Asserts the command fails AND its stderr mentions the given text.
 assert_fails_with() {
   local expected="$1" name="$2"; shift 2

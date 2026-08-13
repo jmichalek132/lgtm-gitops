@@ -16,6 +16,12 @@ run()   { "$@" || STATUS=1; }
 NOTES=()
 note() { NOTES+=("$1"); }
 
+# Verification this run did NOT perform. Unlike a note, a caveat changes the
+# final status line: every check that ran may have passed, but a run that
+# skipped one cannot claim a clean bill of health it did not earn.
+CAVEATS=()
+caveat() { CAVEATS+=("$1"); }
+
 have() { command -v "$1" >/dev/null 2>&1; }
 
 require() {
@@ -124,6 +130,7 @@ fi
 # Set ALLOW_MISSING_LOKITOOL=1 for a local run without it, never in CI.
 if [ "${ALLOW_MISSING_LOKITOOL:-0}" = "1" ] && ! have lokitool; then
   printf 'WARNING: lokitool missing, LogQL syntax NOT checked (local override)\n' >&2
+  caveat 'LogQL syntax was NOT checked: lokitool is missing and ALLOW_MISSING_LOKITOOL=1 was set. Every loki rule in this repository is unvalidated by this run.'
 elif require lokitool; then
   if collect_find rules -path 'rules/*/loki/*' -name '*.yaml'; then
     if [ "${#FILES[@]}" -gt 0 ]; then
@@ -163,9 +170,15 @@ if [ "${#NOTES[@]}" -gt 0 ]; then
   for n in "${NOTES[@]}"; do printf 'NOTE: %s\n' "$n"; done
 fi
 
-if [ "$STATUS" -eq 0 ]; then
-  printf '\nall checks passed\n'
-else
+if [ "$STATUS" -ne 0 ]; then
   printf '\nCHECKS FAILED\n' >&2
+elif [ "${#CAVEATS[@]}" -gt 0 ]; then
+  # Deliberately not the words "all checks passed": a run that skipped a check
+  # must not be greppable, or readable, as one that did not.
+  printf '\nCHECKS INCOMPLETE: everything that ran passed, but this run did NOT verify:\n'
+  for c in "${CAVEATS[@]}"; do printf '  - %s\n' "$c"; done
+  printf 'This is not a clean bill of health. CI must never end here.\n'
+else
+  printf '\nall checks passed\n'
 fi
 exit "$STATUS"

@@ -2,10 +2,13 @@
 """Structure and contract checks for the observability-rules repository.
 
 Query-language validity is NOT checked here: promtool and lokitool do that in
-CI stage 3, and they are version-aligned with the deployed backends. This helper
-covers what those tools cannot see, namely repository layout, the label and
-annotation contract, the canonical environment matcher, CODEOWNERS agreement,
-and dashboard identity.
+stage 4 of scripts/check.sh, and they are version-aligned with the deployed
+backends. This helper covers what those tools cannot see, namely repository
+layout, the label and annotation contract, the canonical environment matcher,
+who owns what, CODEOWNERS agreement, and dashboard identity.
+
+Exit codes: 0 clean, 1 findings, 3 clean but the repository still ships the
+placeholder owner organisation and so enforces nothing (see check_ownership).
 
 Every check_* function takes the repository root and returns a list of
 human-readable findings. An empty list means the check passed.

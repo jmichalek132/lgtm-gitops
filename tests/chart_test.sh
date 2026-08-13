@@ -5,7 +5,8 @@ cd "$(dirname "$0")/.."
 
 echo "chart: happy path"
 
-OUT=$(helm template t . --set target=mimir --set tenant=platform)
+render "mimir happy path renders" helm template t . --set target=mimir --set tenant=platform
+OUT="$RENDER_OUT"
 
 assert_contains "$OUT" "name: platform-platform-mimir-deadman-alerts" \
   "ConfigMap name is <tenant>-<team>-<target>-<file>"
@@ -58,12 +59,16 @@ assert_fails_with "matched no deployable rule files" \
   "a target holding only test fixtures refuses to render empty" \
   helm template t "$EMPTY_CHART" --set target=loki --set tenant=platform
 
-OUT_EMPTY=$(helm template t "$EMPTY_CHART" \
-  --set target=loki --set tenant=platform --set allowEmpty=true)
-if [ -z "$(printf '%s' "$OUT_EMPTY" | tr -d '[:space:]')" ]; then
-  pass "allowEmpty=true permits a deliberate empty render"
-else
-  fail "allowEmpty=true permits a deliberate empty render" "expected empty output"
+# The one assertion that expects NO output, so it is the one where a helm
+# failure would be read as success. render checks the exit status first.
+if render "allowEmpty=true renders without failing" \
+  helm template t "$EMPTY_CHART" --set target=loki --set tenant=platform --set allowEmpty=true
+then
+  if [ -z "$(printf '%s' "$RENDER_OUT" | tr -d '[:space:]')" ]; then
+    pass "allowEmpty=true permits a deliberate empty render"
+  else
+    fail "allowEmpty=true permits a deliberate empty render" "expected empty output"
+  fi
 fi
 
 mkdir -p "$EMPTY_CHART/rules/Bad_Team/mimir"
@@ -84,17 +89,21 @@ rm -rf "$EMPTY_CHART/rules/platform/mimir"
 
 echo "chart: exclusion, subfolders and prometheus target"
 
-OUT_MIMIR=$(helm template t . --set target=mimir --set tenant=platform)
+render "mimir target renders for the exclusion check" \
+  helm template t . --set target=mimir --set tenant=platform
+OUT_MIMIR="$RENDER_OUT"
 assert_not_contains "$OUT_MIMIR" "deadman-alerts-tests" \
   "-tests.yaml fixtures are excluded from ConfigMaps"
 
-OUT_LOKI=$(helm template t . --set target=loki --set tenant=platform)
+render "loki target renders" helm template t . --set target=loki --set tenant=platform
+OUT_LOKI="$RENDER_OUT"
 assert_contains "$OUT_LOKI" "name: platform-platform-loki-deadman-alerts" \
   "loki target renders its own canary"
 assert_contains "$OUT_LOKI" 'k8s-sidecar-target-directory: "platform"' \
   "loki target keeps the tenant annotation"
 
-OUT_PROM=$(helm template t . --set target=prometheus --set tenant=platform)
+render "prometheus target renders" helm template t . --set target=prometheus --set tenant=platform
+OUT_PROM="$RENDER_OUT"
 assert_contains "$OUT_PROM" "name: platform-platform-prometheus-deadman-alerts" \
   "prometheus target renders its own canary"
 assert_not_contains "$OUT_PROM" "k8s-sidecar-target-directory" \
@@ -116,7 +125,8 @@ groups:
           summary: Proves subfolders flatten into the generated key.
           runbook_url: https://runbooks.internal/observability-rules/example
 YAML
-OUT_NESTED=$(helm template t "$EMPTY_CHART" --set target=mimir --set tenant=platform)
+render "subfolder chart renders" helm template t "$EMPTY_CHART" --set target=mimir --set tenant=platform
+OUT_NESTED="$RENDER_OUT"
 assert_contains "$OUT_NESTED" "platform-mimir-nested-example-alerts.yaml:" \
   "subfolder path flattens into the data key"
 rm -rf "$EMPTY_CHART/rules/platform/mimir"
