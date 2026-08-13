@@ -6,8 +6,11 @@ These execute the real script; they are the only way to observe that.
 """
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CHECK_SH = REPO_ROOT / "scripts" / "check.sh"
@@ -21,6 +24,19 @@ EMPTY_DISCOVERY = (
     "no test fixtures found",
 )
 
+# check.sh's own `require` already fails a run missing one of these, and CI
+# installs all four, so that is where absence is actually enforced. These
+# tests exist to observe check.sh's own behaviour, not to re-derive it: run
+# them for real when the toolchain is here, skip (not fail) when it is not,
+# so a workstation without e.g. lokitool gets a clean signal instead of a
+# failure that has nothing to do with the code under test.
+REQUIRED_TOOLS = ("helm", "promtool", "promruval", "lokitool")
+MISSING_TOOLS = [tool for tool in REQUIRED_TOOLS if shutil.which(tool) is None]
+requires_toolchain = pytest.mark.skipif(
+    bool(MISSING_TOOLS),
+    reason=f"missing required tool(s) for check.sh: {', '.join(MISSING_TOOLS)}",
+)
+
 
 def run_check(env_path: str | None = None) -> subprocess.CompletedProcess:
     env = dict(os.environ)
@@ -31,6 +47,7 @@ def run_check(env_path: str | None = None) -> subprocess.CompletedProcess:
     )
 
 
+@requires_toolchain
 def test_check_sh_passes_and_actually_discovers_rules():
     proc = run_check()
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -47,6 +64,7 @@ def test_check_sh_passes_and_actually_discovers_rules():
         )
 
 
+@requires_toolchain
 def test_check_sh_fails_when_rule_discovery_fails(tmp_path):
     # Reproduces the silent skip: `collect < <(find ... | sort -z)` discarded the
     # exit status of both commands, so a find that died looked exactly like a
