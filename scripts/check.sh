@@ -49,36 +49,74 @@ collect() {
   while IFS= read -r -d '' f; do FILES+=("$f"); done
 }
 
+# Discovery that FAILS when discovery fails. `collect < <(find ... | sort -z)`
+# threw the exit status of both commands away: process substitution does not
+# propagate it and the pipeline status is not the reader's. A `find` that died
+# produced an empty FILES, which is indistinguishable from "this repository has
+# no rule files", so every stage reported "no files found" and the run ended
+# `all checks passed` having validated nothing. That silent skip is the exact
+# failure this repository exists to prevent, so discovery is run through a
+# temporary file where both statuses can be seen and checked.
+collect_find() {
+  local raw sorted rc
+  FILES=()
+  raw=$(mktemp "${TMPDIR:-/tmp}/observability-rules-find.XXXXXX") || {
+    printf 'unable to create temporary file for rule discovery\n' >&2
+    STATUS=1
+    return 1
+  }
+  sorted="${raw}.sorted"
+  rc=0
+
+  if ! find "$@" -print0 >"$raw"; then
+    printf 'rule discovery failed: find %s\n' "$*" >&2
+    STATUS=1
+    rc=1
+  elif ! sort -z "$raw" >"$sorted"; then
+    printf 'rule discovery failed while sorting results\n' >&2
+    STATUS=1
+    rc=1
+  else
+    collect <"$sorted"
+  fi
+
+  rm -f "$raw" "$sorted"
+  return "$rc"
+}
+
 stage "3. contract (promruval)"
 if require promruval; then
   # promruval needs explicit paths; fixtures are not rule files.
   # Split by dialect. promruval parses PromQL by default; --support-loki is
   # required for LogQL rules and --support-mimir for Mimir-flavoured ones.
   # Verified against the promruval README.
-  collect < <(find rules \( -path 'rules/*/mimir/*' -o -path 'rules/*/prometheus/*' \) \
-    -name '*.yaml' ! -name '*-tests.yaml' -print0 | sort -z)
-  if [ "${#FILES[@]}" -gt 0 ]; then
-    run promruval validate --config-file=./validation.yaml --support-mimir "${FILES[@]}"
-  else
-    printf 'no mimir/prometheus rule files found\n'
+  if collect_find rules \( -path 'rules/*/mimir/*' -o -path 'rules/*/prometheus/*' \) \
+    -name '*.yaml' ! -name '*-tests.yaml'; then
+    if [ "${#FILES[@]}" -gt 0 ]; then
+      run promruval validate --config-file=./validation.yaml --support-mimir "${FILES[@]}"
+    else
+      printf 'no mimir/prometheus rule files found\n'
+    fi
   fi
 
-  collect < <(find rules -path 'rules/*/loki/*' -name '*.yaml' -print0 | sort -z)
-  if [ "${#FILES[@]}" -gt 0 ]; then
-    run promruval validate --config-file=./validation.yaml --support-loki "${FILES[@]}"
-  else
-    printf 'no loki rule files found\n'
+  if collect_find rules -path 'rules/*/loki/*' -name '*.yaml'; then
+    if [ "${#FILES[@]}" -gt 0 ]; then
+      run promruval validate --config-file=./validation.yaml --support-loki "${FILES[@]}"
+    else
+      printf 'no loki rule files found\n'
+    fi
   fi
 fi
 
 stage "4. syntax (promtool, lokitool)"
 if require promtool; then
-  collect < <(find rules \( -path 'rules/*/mimir/*' -o -path 'rules/*/prometheus/*' \) \
-    -name '*.yaml' ! -name '*-tests.yaml' -print0 | sort -z)
-  if [ "${#FILES[@]}" -gt 0 ]; then
-    run promtool check rules "${FILES[@]}"
-  else
-    printf 'no mimir/prometheus rule files found\n'
+  if collect_find rules \( -path 'rules/*/mimir/*' -o -path 'rules/*/prometheus/*' \) \
+    -name '*.yaml' ! -name '*-tests.yaml'; then
+    if [ "${#FILES[@]}" -gt 0 ]; then
+      run promtool check rules "${FILES[@]}"
+    else
+      printf 'no mimir/prometheus rule files found\n'
+    fi
   fi
 fi
 # lokitool is REQUIRED, not optional. Making it optional meant CI silently
@@ -87,11 +125,12 @@ fi
 if [ "${ALLOW_MISSING_LOKITOOL:-0}" = "1" ] && ! have lokitool; then
   printf 'WARNING: lokitool missing, LogQL syntax NOT checked (local override)\n' >&2
 elif require lokitool; then
-  collect < <(find rules -path 'rules/*/loki/*' -name '*.yaml' -print0 | sort -z)
-  if [ "${#FILES[@]}" -gt 0 ]; then
-    run lokitool rules check "${FILES[@]}"
-  else
-    printf 'no loki rule files found\n'
+  if collect_find rules -path 'rules/*/loki/*' -name '*.yaml'; then
+    if [ "${#FILES[@]}" -gt 0 ]; then
+      run lokitool rules check "${FILES[@]}"
+    else
+      printf 'no loki rule files found\n'
+    fi
   fi
 fi
 
@@ -101,14 +140,15 @@ stage "5. unit tests (promtool test rules)"
 # (rulecheck's `fixtures` check), which parses every fixture and fails when its
 # `tests` or `rule_files` list is absent or empty.
 if require promtool; then
-  collect < <(find rules -name '*-tests.yaml' -print0 | sort -z)
-  if [ "${#FILES[@]}" -eq 0 ]; then
-    printf 'no test fixtures found\n'
-  else
-    for f in "${FILES[@]}"; do
-      # promtool resolves rule_files relative to the fixture, so run in its directory.
-      ( cd "$(dirname "$f")" && promtool test rules "$(basename "$f")" ) || STATUS=1
-    done
+  if collect_find rules -name '*-tests.yaml'; then
+    if [ "${#FILES[@]}" -eq 0 ]; then
+      printf 'no test fixtures found\n'
+    else
+      for f in "${FILES[@]}"; do
+        # promtool resolves rule_files relative to the fixture, so run in its directory.
+        ( cd "$(dirname "$f")" && promtool test rules "$(basename "$f")" ) || STATUS=1
+      done
+    fi
   fi
 fi
 
