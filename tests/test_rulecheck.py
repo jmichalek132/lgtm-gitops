@@ -661,6 +661,79 @@ def test_codeowners_rejects_an_owner_less_governed_path(tmp_path):
     assert any("scripts/" in f for f in findings)
 
 
+def test_codeowners_rejects_a_team_folder_owned_by_another_team(tmp_path):
+    # A team's rules are its own ownership boundary. Handing them to a different
+    # team lets that team approve alerting changes for a service it does not run.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER
+               + "/rules/payments/ @org/fraud\n/dashboards/payments/ @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("rules/payments" in f and "@org/fraud" in f for f in findings)
+
+
+def test_codeowners_rejects_a_dashboards_folder_owned_by_another_team(tmp_path):
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER
+               + "/rules/payments/ @org/payments\n/dashboards/payments/ @org/fraud\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("dashboards/payments" in f and "@org/fraud" in f for f in findings)
+
+
+def test_codeowners_rejects_a_rules_entry_with_no_dashboards_entry(tmp_path):
+    # Rules and dashboards are ONE boundary. Owning only the rules leaves the
+    # dashboards falling through to the default owner.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + "/rules/payments/ @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("dashboards/payments" in f and "@org/payments" in f for f in findings)
+
+
+def test_codeowners_rejects_a_dashboards_entry_with_no_rules_entry(tmp_path):
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + "/dashboards/payments/ @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("rules/payments" in f and "@org/payments" in f for f in findings)
+
+
+def test_codeowners_rejects_a_narrower_pattern_stealing_one_team_file(tmp_path):
+    # Last match wins here too: a later, more specific line takes a single rule
+    # file out of the owning team's hands.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/rules/payments/mimir/a-alerts.yaml @org/fraud\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("rules/payments/mimir/a-alerts.yaml" in f and "@org/fraud" in f
+               for f in findings)
+
+
+def test_codeowners_rejects_a_team_folder_with_an_extra_co_owner(tmp_path):
+    # Any co-owner can approve alone on GitHub, so a co-owner on a team folder
+    # is the same bypass as a co-owner on a governing path.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER
+               + "/rules/payments/ @org/payments @org/fraud\n"
+               + "/dashboards/payments/ @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("rules/payments" in f and "@org/fraud" in f for f in findings)
+
+
+def test_codeowners_rejects_a_team_pattern_for_a_file_that_does_not_exist_yet(tmp_path):
+    # The line is the evidence: it mis-owns the file the moment it is created.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/rules/payments/mimir/not-created-yet.yaml @org/fraud\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("not-created-yet.yaml" in f for f in findings)
+
+
+def test_codeowners_accepts_a_team_reclaiming_its_folder_after_a_narrower_pattern(tmp_path):
+    # Last match wins, so a trailing team entry legitimately takes the file back.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER
+               + "/rules/payments/mimir/a-alerts.yaml @org/fraud\n" + TEAM_ENTRIES)
+    assert rulecheck.check_codeowners(tmp_path) == []
+
+
 def test_codeowners_rejects_a_governing_path_with_an_extra_co_owner(tmp_path):
     # On GitHub either co-owner can approve alone, so a governing path is only
     # actually protected when the platform team is the SOLE owner.

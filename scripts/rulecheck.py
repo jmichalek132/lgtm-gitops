@@ -25,7 +25,18 @@ TARGETS = ("mimir", "loki", "prometheus")
 ENVIRONMENTS = ("dev", "staging", "prod")
 SEVERITIES = ("info", "warning", "error", "critical")
 PLATFORM_TEAM = "platform"
-PLATFORM_OWNER = f"@org/{PLATFORM_TEAM}"
+
+# The GitHub organisation whose teams own paths here. Shipped as a placeholder
+# on purpose; see check_ownership and ownership.yaml.
+OWNERS_ORG = "@org"
+
+
+def team_owner(team: str, org: str = OWNERS_ORG) -> str:
+    """The GitHub handle that must own `team`'s rules and dashboards."""
+    return f"{org}/{team}"
+
+
+PLATFORM_OWNER = team_owner(PLATFORM_TEAM)
 
 # Targets whose rules promtool can unit-test. Loki has no LogQL unit-test
 # command, so a fixture there would never run and must not be committed.
@@ -539,18 +550,42 @@ def governed_probe_paths(root: Path, entry: str, patterns: list[str]) -> list[st
     return sorted(probes)
 
 
+def resolve_owners(
+    compiled: list[tuple[str, list[str], re.Pattern[str]]], probe: str
+) -> tuple[str, list[str]] | None:
+    """Who GitHub says owns `probe`, or None if no pattern matches it.
+
+    GitHub resolves ownership by the LAST matching pattern, so a more specific
+    line later in the file overrides an earlier directory entry.
+    """
+    winner = None
+    for pattern, owners, regex in compiled:
+        if regex.match(probe):
+            winner = (pattern, owners)
+    return winner
+
+
+def describe_probe(probe: str) -> str:
+    """A human-readable name for a probe path, which may be synthetic."""
+    if probe.endswith(CODEOWNERS_PROBE):
+        return f"any file under {probe[: -len(CODEOWNERS_PROBE)]}"
+    return probe
+
+
 def check_codeowners(root: Path) -> list[str]:
     findings: list[str] = []
     if not (root / ".github" / "CODEOWNERS").is_file():
         return [".github/CODEOWNERS is missing"]
 
+    org = OWNERS_ORG
     owned_teams, entries = codeowners_entries(root)
     actual_teams = team_folders(root)
 
     for team in sorted(actual_teams - owned_teams):
         findings.append(
             f"team '{team}' has folders but no CODEOWNERS entry; "
-            f"add '/rules/{team}/ @org/{team}'"
+            f"add '/rules/{team}/ {team_owner(team, org)}' and "
+            f"'/dashboards/{team}/ {team_owner(team, org)}'"
         )
 
     for team in sorted(owned_teams - actual_teams):
@@ -574,12 +609,7 @@ def check_codeowners(root: Path) -> list[str]:
     patterns = [pattern for pattern, _ in entries]
     for entry in PLATFORM_OWNED_PATHS:
         for probe in governed_probe_paths(root, entry, patterns):
-            # GitHub resolves ownership by the LAST matching pattern, so a more
-            # specific line later in the file overrides an earlier directory entry.
-            winner = None
-            for pattern, owners, regex in compiled:
-                if regex.match(probe):
-                    winner = (pattern, owners)
+            winner = resolve_owners(compiled, probe)
             if winner is None:
                 findings.append(
                     f"CODEOWNERS must assign the platform team to '{entry}': no pattern "
@@ -605,6 +635,49 @@ def check_codeowners(root: Path) -> list[str]:
                     f"approve changes to the checks that govern it; "
                     f"{PLATFORM_OWNER} must be the sole owner"
                 )
+
+    # A team's rules and its dashboards are ONE ownership boundary, and it is the
+    # team's own. Reconciling the SET of team names against the SET of folders,
+    # which is all this used to do, never asked the only question that matters:
+    # does rules/<team>/ actually resolve to <team>? Two holes followed from that.
+    # Another team could be named as the owner of your alerting rules, and a team
+    # could own its rules while its dashboards quietly fell through to the default
+    # owner. Both are checked here, per path, last-match-wins, exactly as GitHub
+    # resolves them.
+    #
+    # Only teams that appear in CODEOWNERS are checked: a team with folders and no
+    # entry at all is already reported above, and repeating it per path would bury
+    # the one finding that says what to add.
+    for team in sorted(owned_teams):
+        expected = team_owner(team, org)
+        for parent in ("rules", "dashboards"):
+            entry = f"/{parent}/{team}/"
+            for probe in governed_probe_paths(root, entry, patterns):
+                winner = resolve_owners(compiled, probe)
+                if winner is None:
+                    findings.append(
+                        f"CODEOWNERS leaves {describe_probe(probe)} unowned: no pattern "
+                        f"matches it, so anyone can approve a change to team '{team}'s "
+                        f"{parent}. {expected} must own it"
+                    )
+                    continue
+                pattern, owners = winner
+                if expected not in owners:
+                    findings.append(
+                        f"CODEOWNERS gives {describe_probe(probe)} to "
+                        f"{owners or 'nobody'} through pattern '{pattern}', which is the "
+                        f"last pattern matching it and therefore the one GitHub applies. "
+                        f"A team's rules and dashboards are one ownership boundary and it "
+                        f"is the team's own, so this must resolve to {expected}"
+                    )
+                elif set(owners) != {expected}:
+                    extra = sorted(set(owners) - {expected})
+                    findings.append(
+                        f"CODEOWNERS gives {describe_probe(probe)} to {expected} AND "
+                        f"{extra} through pattern '{pattern}'. On GitHub any co-owner can "
+                        f"approve alone, so {extra} can still approve team '{team}'s "
+                        f"{parent}; {expected} must be the sole owner"
+                    )
 
     return findings
 
