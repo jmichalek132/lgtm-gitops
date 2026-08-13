@@ -519,14 +519,23 @@ def ownership_warnings(root: Path) -> list[str]:
     org, configured, errors = load_ownership(root)
     if errors or configured:
         return []
+    if org == PLACEHOLDER_OWNERS_ORG:
+        return [
+            f"UNCONFIGURED: {OWNERSHIP_FILE} says configured: false, so this repository "
+            f"is the shipped example. '{org}/...' is a placeholder organisation that does "
+            f"not exist on GitHub, and GitHub silently ignores owners it cannot resolve, "
+            f"so NO review is actually required for ANY path here. The ownership checks "
+            f"verify that CODEOWNERS is internally consistent; they cannot make GitHub "
+            f"enforce it. Set a real organisation in {OWNERSHIP_FILE} before this "
+            f"repository governs anything."
+        ]
     return [
-        f"UNCONFIGURED: {OWNERSHIP_FILE} says configured: false, so this repository "
-        f"is the shipped example. '{org}/...' is a placeholder organisation that does "
-        f"not exist on GitHub, and GitHub silently ignores owners it cannot resolve, "
-        f"so NO review is actually required for ANY path here. The ownership checks "
-        f"verify that CODEOWNERS is internally consistent; they cannot make GitHub "
-        f"enforce it. Set a real organisation in {OWNERSHIP_FILE} before this "
-        f"repository governs anything."
+        f"UNCONFIGURED: {OWNERSHIP_FILE} says configured: false, even though 'org' is "
+        f"set to '{org}'. Ownership here is not yet declared configured, so the checks "
+        f"that would confirm CODEOWNERS actually matches '{org}' are not enforced as a "
+        f"build failure: whatever GitHub does with the handles in CODEOWNERS right now "
+        f"is unverified by this run. Set 'configured: true' in {OWNERSHIP_FILE} once "
+        f"CODEOWNERS matches '{org}' to make that enforcement real."
     ]
 
 

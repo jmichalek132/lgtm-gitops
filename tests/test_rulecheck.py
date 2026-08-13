@@ -845,6 +845,28 @@ def test_ownership_warns_but_does_not_fail_when_unconfigured(tmp_path):
     assert any("UNCONFIGURED" in w for w in warnings)
 
 
+def test_ownership_warning_calls_the_shipped_org_a_placeholder(tmp_path):
+    # configured: false with the shipped '@org' placeholder: the placeholder
+    # language is true here, so the warning may say the org does not exist.
+    ownership(tmp_path, UNCONFIGURED)
+    warnings = rulecheck.ownership_warnings(tmp_path)
+    assert any("placeholder organisation that does" in w for w in warnings)
+    assert not any("not yet declared configured" in w for w in warnings)
+
+
+def test_ownership_warning_does_not_call_a_real_org_a_placeholder(tmp_path):
+    # configured: false but 'org' already points at a real-looking organisation:
+    # the adopter has migrated their handles but not yet flipped the flag. The
+    # warning must not claim '@acme' is fake, only that it is not yet enforced.
+    ownership(tmp_path, 'configured: false\norg: "@acme"\n')
+    warnings = rulecheck.ownership_warnings(tmp_path)
+    assert any("not yet declared configured" in w for w in warnings)
+    assert not any("is a placeholder organisation that does" in w for w in warnings)
+    assert not any(
+        "'@acme/...' is a placeholder organisation" in w for w in warnings
+    )
+
+
 def test_ownership_rejects_a_missing_file(tmp_path):
     findings = rulecheck.check_ownership(tmp_path)
     assert any(rulecheck.OWNERSHIP_FILE in f for f in findings)
