@@ -202,11 +202,20 @@ a term embedded in a longer identifier.
 Define `N(s)` as Unicode NFKC applied to `s`, followed by `casefold()`. Define
 three deletion operators over an already-normalised string:
 
-- `P` removes every character whose Unicode general category starts with `P` or
-  `Z`, plus category `Cf`
-- `L` removes CRLF as one break, and removes CR, LF, NEL, U+2028 and U+2029
-  individually
+- `P` removes every character whose Unicode general category starts with `P`,
+  `Z`, `S` or `M`, plus category `Cf`
+- `L` removes CRLF as one break, removes CR, LF, NEL, U+2028 and U+2029
+  individually, and removes category `Cc`
 - `D` removes ASCII digits
+
+`S` and `M` were added to `P`, and `Cc` to `L`, after implementation review
+found eighteen concrete false negatives that the original `P`/`Z`/`Cf` rule
+missed. Among them: `q=<term-part>+<term-part>` in a query string, where `+` is
+category `Sm` and is exactly how a space is encoded; `| <part> | <part> |` in a
+Markdown table; and a tab, which is `Cc` rather than `Z`. Controls go to `L`
+rather than `P` deliberately: folding them into `P` makes `P` subsume `L`, so a
+line-split finding would report mask `P` instead of `L` and lose the triage
+information findings are required to carry.
 
 For each term independently, the eligible deletion masks are every subset of
 `{P, L}`, plus every subset containing `D` only when `N(term)` contains no ASCII
@@ -246,13 +255,34 @@ The candidate base views are constructed as follows:
   zero, one or two padding characters produces a valid length. Invalid maximal
   runs therefore cannot suppress a valid contained candidate. Decode each valid
   candidate independently, decode its bytes as UTF-8 with replacement, and
-  construct a view in which that candidate is replaced by the decoded text.
+  use the decoded text itself as the view. Base64 extraction additionally runs
+  a second pass over a whitespace-stripped copy of the candidate, because an
+  alphabet run terminates at a newline and a wrapped blob would otherwise
+  decode as two halves neither of which holds the term. Wrapping is not
+  exotic: PEM blocks, MIME 76-column encoding and folded YAML scalars all
+  produce it.
 
 Apply `N` to every decoder result, then apply the same eligible deletion masks
 to the decoder result and the plaintext term. Decoders are applied only to raw
 candidates, never to denylist terms and never to another decoder's output.
 Invalid encoding candidates are not scanner errors, but they do not suppress
 another valid candidate.
+
+Views are built **once per candidate**, not once per mask. An earlier revision
+of this section required each decoded candidate to be spliced back into a full
+copy of the surrounding text, and did not say where view construction sat
+relative to the mask loop. Implemented literally, that is quadratic: measured,
+a single 11,685-byte repository file took 137 seconds against one term, and the
+largest file in the repository extrapolated to roughly two hours. Every
+identifier of two or more characters is a Base64 alphabet run, so the cost
+falls on ordinary source files, and a clean repository is the worst case
+because nothing short-circuits. After building views once and using the decoded
+text directly, the same files take 0.100 and 0.496 seconds.
+
+The splice is what was given up. A term straddling the boundary between a
+Base64 blob and the plaintext next to it is no longer matched. That is not a
+form a repository produces naturally, and the trade is not optional: a scanner
+slow enough to be disabled protects nothing.
 
 **Base64 is why normalisation cannot come first.** An earlier revision
 normalised and case-folded before decoding. Base64 is case-sensitive, so that
