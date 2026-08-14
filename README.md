@@ -187,6 +187,9 @@ and are, at the time of writing:
 | lokitool  | `3.3.2`   | release zip, checksum-verified        |
 | Python    | `3.12`    | `actions/setup-python`, pinned by SHA |
 
+`scripts/rulecheck.py` requires **Python 3.11 or newer** (`glob.glob`'s
+`root_dir` needs 3.10, `include_hidden` needs 3.11).
+
 `.github/workflows/ci.yaml` is the source of truth; read the `env:` block there
 rather than this table if the two disagree.
 
