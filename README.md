@@ -56,9 +56,11 @@ Ownership rules that follow, all enforced by `make check`:
 
    No matcher at all means all environments. Values come from `dev`, `staging`,
    `prod`, in that order, no duplicates, no negation, no plain `=`.
-4. Run `make check` before pushing. CI runs the same *commands*: its only step
-   is `make check`, so nothing is checked in CI that you cannot run locally.
-   It does not run the same tool *versions* unless you pin them yourself, see
+4. Run `make check` before pushing. CI runs the same *command*, but not with
+   the same coverage: **CI cannot run the private term scan** (Gate 2), so a
+   green `public-checks` is not evidence that your change was privately
+   scanned. See [Publishability gates](#publishability-gates). CI also does
+   not run the same tool *versions* unless you pin them yourself, see
    [Local setup](#local-setup).
 
 ## Adding a dashboard
@@ -76,6 +78,70 @@ opens a branch, which you turn into a pull request as usual.
 rules it tests. **This works for `mimir` and `prometheus` targets only.**
 `lokitool` has no unit-test command, so LogQL alerts cannot be behaviourally
 tested. Do not assume log alerts are covered by tests.
+
+## Publishability gates
+
+This repository is meant to be publishable, so two checks guard against
+committing something that should stay private. Both run as part of
+`make check`; neither is optional.
+
+**Gate 1** (`scripts/rulecheck.py`'s `publishability` check, configured in
+[`publishability.yaml`](publishability.yaml)) scans every tracked and
+untracked file for a small set of readable, non-secret patterns, currently a
+macOS or Linux home directory path. It has **no self-exemption**:
+`publishability.yaml` is scanned like any other file, which is why its own
+regexes write the leading slash as `[/]` rather than `/`. A pattern written
+the naive way would match the line that defines it, and an earlier revision
+of this design used that as an excuse to skip scanning the file; there is no
+such excuse now. Gate 1 has no secret input, so it runs everywhere, including
+CI.
+
+**Gate 2** (`scripts/privatescan.py`) scans the same files for actual private
+terms: former internal codenames, personal names, anything that must never
+appear in the published history at all. Its denylist is **never** part of
+this repository. It lives on disk outside the checkout, at whatever path
+`PUBLISHABILITY_TERMS_FILE` points to, and nothing derived from a term in it
+is ever committed here, not the term, not a hash, not a length. A finding
+names only the denylist entry's opaque id (`private-term-01`, never a
+descriptive name) and where it was found; the term itself, the matched text
+and any parser detail that could embed either are never printed. Treat every
+line Gate 2 prints, including its raw findings and any diagnostics before a
+denylist has loaded, as confidential: pipe it somewhere private, and don't
+paste it into a public issue or chat while asking for help.
+
+To run it locally:
+
+```bash
+export PUBLISHABILITY_TERMS_FILE=/path/outside/this/repository/denylist.yaml
+make check
+```
+
+Gate 2 is **fail-closed**: an absent, unreadable or malformed denylist is a
+failure, not a skip. That is deliberate. A skip that quietly passed would
+turn "I forgot to set `PUBLISHABILITY_TERMS_FILE`" into a green build, which
+defeats the point of a gate that exists to catch exactly that kind of
+mistake.
+
+There is exactly one permitted way to skip it, and it exists solely because
+CI must never hold the denylist: CI runs pull-request-controlled code, and a
+secret available to `make check` in CI would be available to whatever a pull
+request's own code does. Setting `PUBLISHABILITY_PRIVATE_SCAN=skip-untrusted-ci`
+together with `CI=true` makes `scripts/check.sh` skip Gate 2 and end the run
+with `CHECKS INCOMPLETE`, not `all checks passed`, naming the private scan as
+something this run did not verify. `CI=true` is an ordinary environment
+variable, not an authentication check: setting it by hand locally reproduces
+the skip, which means the skip cannot be trusted to stop a deliberate bypass,
+only an accidental one. Any other value of `PUBLISHABILITY_PRIVATE_SCAN`, or
+the named skip without `CI=true`, is a hard failure.
+
+The practical consequence: **a green `public-checks` run on a pull request is
+not evidence that the change was privately scanned.** CI cannot run Gate 2 at
+all. The only place Gate 2 actually runs is a contributor's own machine, with
+their own `PUBLISHABILITY_TERMS_FILE` set, before they push. That is a
+contributor obligation this repository asks of you, not something CI
+automatically guarantees on your behalf. See section 9 of
+[the design doc](docs/superpowers/specs/2026-08-14-publishable-example-design.md#9-what-this-does-not-make-safe)
+for exactly what this does and does not make safe.
 
 ## Local setup
 
