@@ -176,8 +176,24 @@ def _search_with_deadline(regex: str, text: str, deadline: float):
     try:
         status, payload = queue.get(timeout=deadline)
     except Exception:
+        # "No result in time" has two causes that must not share a diagnosis
+        # or a consequence. If the process is already gone it died before it
+        # could put anything (a failed spawn, an interpreter that could not
+        # re-import __main__, an OOM kill): the regex was never executed, so
+        # calling it a matching deadline is false, and disabling the pattern
+        # for every remaining file turns an environment fault into a silent
+        # scan of nothing. Only a worker still running when the clock expired
+        # actually exceeded the deadline; 'error' findings do not disable the
+        # pattern, 'timeout' findings do.
+        proc.join(timeout=0)
+        died, exitcode = (not proc.is_alive()), proc.exitcode
         proc.kill()
         proc.join()
+        if died:
+            return "error", (
+                f"matching worker exited with code {exitcode} without producing a "
+                f"result, so this pattern was never executed against this file"
+            )
         return "timeout", None
     proc.join()
     return status, payload

@@ -205,6 +205,35 @@ def test_worker_exception_becomes_a_finding_not_an_empty_result():
     assert "could not be checked" in findings[0]
 
 
+def _die_before_producing_a_result(regex, text, queue):
+    """Stand-in worker target for test_dead_worker_is_reported_as_an_error_not_a_deadline.
+
+    Deliberately module-level, not a closure defined inside the test: the
+    'spawn' multiprocessing context pickles its target by (module, qualname)
+    reference, and a function nested inside a test function is not
+    picklable that way (`PicklingError: Can't pickle local object`),
+    confirmed by running the reviewer's original inline-closure version
+    verbatim before writing this one. This is the only deviation from the
+    findings doc's verbatim fix; the assertions and monkeypatch target are
+    unchanged."""
+    raise SystemExit(3)
+
+
+def test_dead_worker_is_reported_as_an_error_not_a_deadline(monkeypatch):
+    """A worker that dies before producing a result must not be reported as a
+    matching deadline, and must not disable the pattern for later files: the
+    regex was never run, so the environment failed, not the pattern."""
+    import scripts.rulecheck as rc
+
+    monkeypatch.setattr(rc, "_search_worker", _die_before_producing_a_result)
+    patterns = [{"id": "p", "regex": "x", "message": "probe"}]
+    findings = rc.scan_text_with_patterns("x.txt", "xxx", patterns, deadline=1.0)
+    assert len(findings) == 1
+    assert "deadline" not in findings[0]
+    assert "never executed" in findings[0]
+    assert "_disabled" not in patterns[0]
+
+
 def test_large_result_completes_well_inside_the_deadline_with_correct_lines():
     """The old code had two compounding bugs on a large result: joining the
     worker process before draining its queue deadlocks once the pickled
