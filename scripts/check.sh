@@ -166,6 +166,27 @@ if require helm; then
   run python3 scripts/render_assert.py
 fi
 
+stage "8. private term scan (Gate 2)"
+# Gate 2 is fail-closed. An absent denylist is a FAILURE, not a caveat: the
+# caveat mechanism exits 0, so Make, Actions and pre-push hooks would all read
+# "could not run" as success.
+#
+# CI=true is an ordinary environment value, not authentication. This skip stops
+# an absent denylist from accidentally becoming a green local run; it cannot
+# stop a deliberate bypass, and section 9 of the design says so.
+if [ "${PUBLISHABILITY_PRIVATE_SCAN:-}" = "skip-untrusted-ci" ] && [ "${CI:-}" = "true" ]; then
+  caveat 'the private term scan did NOT run: this job is public-checks only and deliberately holds no denylist.'
+elif [ -n "${PUBLISHABILITY_PRIVATE_SCAN:-}" ] && [ "${PUBLISHABILITY_PRIVATE_SCAN}" != "skip-untrusted-ci" ]; then
+  printf 'PUBLISHABILITY_PRIVATE_SCAN=%s is not a recognised value; the only accepted skip is skip-untrusted-ci under CI=true\n' \
+    "${PUBLISHABILITY_PRIVATE_SCAN}" >&2
+  STATUS=1
+elif [ "${PUBLISHABILITY_PRIVATE_SCAN:-}" = "skip-untrusted-ci" ]; then
+  printf 'PUBLISHABILITY_PRIVATE_SCAN=skip-untrusted-ci is only accepted when CI=true\n' >&2
+  STATUS=1
+elif require python3; then
+  python3 scripts/privatescan.py . || STATUS=1
+fi
+
 if [ "${#NOTES[@]}" -gt 0 ]; then
   printf '\n'
   for n in "${NOTES[@]}"; do printf 'NOTE: %s\n' "$n"; done
@@ -178,7 +199,7 @@ elif [ "${#CAVEATS[@]}" -gt 0 ]; then
   # must not be greppable, or readable, as one that did not.
   printf '\nCHECKS INCOMPLETE: everything that ran passed, but this run did NOT verify:\n'
   for c in "${CAVEATS[@]}"; do printf '  - %s\n' "$c"; done
-  printf 'This is not a clean bill of health. CI must never end here.\n'
+  printf 'This is not a clean bill of health. Only the deliberate public-checks CI job may end here.\n'
 else
   printf '\nall checks passed\n'
 fi

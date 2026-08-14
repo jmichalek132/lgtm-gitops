@@ -11,11 +11,23 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import unicodedata
 from pathlib import Path
 from typing import Iterator, Mapping
 
 import yaml
+
+# Make `scripts.rulecheck` importable when this file is run directly, e.g.
+# `python3 scripts/privatescan.py .`, and not only via pytest. A direct
+# script invocation puts this file's own directory (scripts/) on
+# sys.path[0], not the repository root, so load_denylist's deferred
+# `from scripts.rulecheck import ...` below would otherwise raise
+# ModuleNotFoundError once a denylist actually parses far enough to reach
+# it, outside a test run where the root is already on sys.path some other
+# way. scripts/rulecheck.py needed the identical fix for the mirror-image
+# import, `from scripts.privatescan import iter_scannable_files`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 class DenylistError(Exception):
@@ -564,3 +576,24 @@ def scan_repository(root: Path, terms: list[dict]) -> list[str]:
             if hit is not None:
                 findings.append(f"{safe}: {term_id} (view={hit[0]}, mask={hit[1]})")
     return findings
+
+
+def main(argv: list[str]) -> int:
+    root = Path(argv[1]) if len(argv) > 1 else Path.cwd()
+    try:
+        terms = load_denylist(os.environ, root)
+    except DenylistError as exc:
+        print(f"[privatescan] {exc}", file=sys.stderr)
+        return 1
+    findings = scan_repository(root, terms)
+    if findings:
+        print(f"[privatescan] {len(findings)} finding(s):", file=sys.stderr)
+        for finding in findings:
+            print(f"  {finding}", file=sys.stderr)
+        return 1
+    print("[privatescan] ok")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

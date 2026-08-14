@@ -15,7 +15,7 @@ env:
   LOKITOOL_VERSION: "3.3.2"
 
 jobs:
-  check:
+  public-checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -90,4 +90,5 @@ jobs:
       - name: make check
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
+          PUBLISHABILITY_PRIVATE_SCAN: skip-untrusted-ci
         run: make check

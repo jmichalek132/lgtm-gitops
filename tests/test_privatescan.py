@@ -2,6 +2,7 @@ import base64
 import os
 import stat as stdlib_stat
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -783,3 +784,84 @@ def test_scan_repository_whole_repo_completes_quickly():
     scan_repository(REPO_ROOT, [{"id": "private-term-01", "value": "zephyrgate"}])
     elapsed = time.perf_counter() - start
     assert elapsed < 15.0
+
+
+# Task 9: the CLI entry point (main), wired into scripts/check.sh's Gate 2
+# stage. Gate 2 is fail-closed: an absent or unusable denylist must be a
+# non-zero exit, never a zero exit and never "no findings".
+#
+# These invoke the real script as a subprocess rather than calling main()
+# in-process, on purpose: a direct `python3 scripts/privatescan.py ...`
+# invocation puts scripts/ on sys.path[0], not the repository root (unlike
+# pytest's own import machinery), so this is the only way to exercise the
+# `sys.path` bootstrap that load_denylist's deferred `from scripts.rulecheck
+# import ...` needs once a denylist actually parses far enough to reach it
+# (see scripts/rulecheck.py, which needed the identical fix in Task 8).
+
+CLI = REPO_ROOT / "scripts" / "privatescan.py"
+
+VALID_TERM_DENYLIST = (
+    'version: 1\nterms:\n  - id: private-term-01\n    value: "zephyrgate"\n'
+)
+
+
+def test_cli_exits_non_zero_when_denylist_is_unset(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(CLI), str(tmp_path)],
+        capture_output=True, text=True, env={"PATH": os.environ["PATH"]},
+    )
+    assert result.returncode != 0
+    assert "PUBLISHABILITY_TERMS_FILE" in result.stderr
+
+
+def test_cli_clean_scan_exits_zero_and_prints_ok(tmp_path, tmp_path_factory):
+    """Exercises the success path end-to-end, including the point where
+    load_denylist's deferred rulecheck import actually runs (an unset
+    denylist, by contrast, never reaches that import at all)."""
+    repo = _git_repo(tmp_path)
+    (repo / "clean.txt").write_text("nothing sensitive here", encoding="utf-8")
+    denylist = tmp_path_factory.mktemp("denylist") / "denylist.yaml"
+    denylist.write_text(VALID_TERM_DENYLIST, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(CLI), str(repo)],
+        capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"], "PUBLISHABILITY_TERMS_FILE": str(denylist)},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[privatescan] ok" in result.stdout
+
+
+def test_cli_reports_findings_and_exits_non_zero(tmp_path, tmp_path_factory):
+    repo = _git_repo(tmp_path)
+    (repo / "leaky.txt").write_text("zephyrgate is mentioned here", encoding="utf-8")
+    subprocess.run(["git", "add", "leaky.txt"], cwd=repo, check=True)
+    denylist = tmp_path_factory.mktemp("denylist") / "denylist.yaml"
+    denylist.write_text(VALID_TERM_DENYLIST, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(CLI), str(repo)],
+        capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"], "PUBLISHABILITY_TERMS_FILE": str(denylist)},
+    )
+    assert result.returncode != 0
+    assert "[privatescan] ok" not in result.stdout
+    assert "finding(s)" in result.stderr
+    # The module's own contract: never print a term or a matched substring.
+    assert "zephyrgate" not in result.stdout + result.stderr
+
+
+def test_cli_defaults_root_to_cwd_when_no_argument_given(tmp_path, tmp_path_factory):
+    repo = _git_repo(tmp_path)
+    (repo / "clean.txt").write_text("nothing sensitive here", encoding="utf-8")
+    denylist = tmp_path_factory.mktemp("denylist") / "denylist.yaml"
+    denylist.write_text(VALID_TERM_DENYLIST, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(CLI)],
+        cwd=repo,
+        capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"], "PUBLISHABILITY_TERMS_FILE": str(denylist)},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[privatescan] ok" in result.stdout
