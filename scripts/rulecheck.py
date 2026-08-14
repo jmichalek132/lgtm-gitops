@@ -209,6 +209,69 @@ def scan_text_with_patterns(
     return findings
 
 
+def _git_scannable_paths(root: Path) -> list[str] | None:
+    """Every path `git ls-files` reports as tracked, or as untracked but not
+    ignored. None, never [], on failure: an empty list here must not be
+    mistaken by the caller for a repository that legitimately has nothing to
+    scan."""
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--cached"],
+            capture_output=True, check=True,
+        )
+        untracked = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--others", "--exclude-standard"],
+            capture_output=True, check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    raw = tracked.stdout + b"\0" + untracked.stdout
+    return [p for p in raw.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def iter_scannable_files(root: Path):
+    """Yield (path, text) for every file Gate 1 should read.
+
+    TEMPORARY: this is Task 4's minimal stand-in, not the shared
+    implementation. The real `iter_scannable_files` ships in Task 8
+    (scripts/privatescan.py, also consumed by Gate 2; see
+    docs/superpowers/plans/2026-08-14-publishability-gates.md) and this
+    function must be deleted outright, not extended, when that lands.
+
+    It exists only because registering "publishability" in CHECKS (this
+    task) makes `check_publishability` call this name the moment the check
+    actually runs. Leaving the name undefined does not make the check
+    inert: it makes `scripts/rulecheck.py` raise an uncaught NameError,
+    which is worse than a finding, and returning an empty scan here without
+    reading anything would make a check that cannot run indistinguishable
+    from one that ran and found nothing clean, exactly the failure mode
+    this repository exists to prevent. So this reads real tracked and
+    untracked-but-not-ignored files with `git ls-files` and actually scans
+    their content. It does not attempt Task 8's fuller edge-case handling
+    (redaction, duplicate or escaped-path detection, gitlinks).
+    """
+    paths = _git_scannable_paths(root)
+    if paths is None:
+        yield "", "file discovery failed, so nothing was scanned (git ls-files did not run)"
+        return
+    for rel in sorted(set(paths)):
+        full = root / rel
+        if full.is_symlink() or not full.is_file():
+            continue
+        try:
+            data = full.read_bytes()
+        except OSError as exc:
+            yield rel, f"{rel}: unreadable ({exc})"
+            continue
+        if b"\x00" in data:
+            yield rel, f"{rel}: contains a NUL byte, so it is binary and is skipped"
+            continue
+        try:
+            yield rel, data.decode("utf-8")
+        except UnicodeDecodeError:
+            yield rel, f"{rel}: not valid UTF-8, skipped"
+
+
 def check_publishability(root: Path) -> list[str]:
     try:
         patterns = load_publishability_config(root)
@@ -607,6 +670,7 @@ PLATFORM_OWNED_PATHS = (
     "/requirements.txt",
     "/.github/",
     f"/{OWNERSHIP_FILE}",
+    f"/{PUBLISHABILITY_FILE}",
 )
 
 
@@ -1131,6 +1195,7 @@ CHECKS = {
     "ownership": check_ownership,
     "codeowners": check_codeowners,
     "dashboards": check_dashboards,
+    "publishability": check_publishability,
 }
 
 

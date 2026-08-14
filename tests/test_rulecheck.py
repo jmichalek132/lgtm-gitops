@@ -933,3 +933,22 @@ def test_ownership_file_is_itself_platform_owned(tmp_path):
 
 def test_shipped_repository_has_no_ownership_failures():
     assert rulecheck.check_ownership(REPO_ROOT) == []
+
+
+def test_publishability_config_is_platform_owned():
+    # It configures Gate 1, so a team that could edit it could disable or
+    # narrow the patterns that keep personal paths out of a published repo.
+    assert f"/{rulecheck.PUBLISHABILITY_FILE}" in rulecheck.PLATFORM_OWNED_PATHS
+
+
+def test_publishability_is_registered():
+    assert "publishability" in rulecheck.CHECKS
+
+
+def test_codeowners_gives_publishability_to_platform(tmp_path):
+    """A team must not be able to take ownership of the gate that governs it."""
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/publishability.yaml @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("publishability" in f for f in findings)

@@ -27,6 +27,10 @@
 # ownership.yaml names the organisation every other entry is checked against, so
 # a team able to edit it could redirect ownership of everything.
 /ownership.yaml @org/platform
+# publishability.yaml configures Gate 1, the public-path scanner rulecheck.py
+# enforces. A team able to edit it could disable or narrow the patterns that
+# keep personal paths out of a published repository.
+/publishability.yaml @org/platform
 
 # Per-team ownership. A team owns its own rules AND its own dashboards, and it
 # owns them alone: on GitHub any co-owner can approve by itself. Both entries
