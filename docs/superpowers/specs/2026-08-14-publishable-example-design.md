@@ -78,18 +78,46 @@ appears-to-pass-but-never-ran failure this repository was built to eliminate.
 
 ### Design
 
-Terms are stored as SHA-256 of the lowercased term. Findings report a
+Terms are stored as SHA-256 of the lowercased term, with the term's length,
+which the scan needs to size its search window. Findings report a
 non-identifying `hint`, never the term.
 
 ```yaml
 # publishability.yaml
 terms:
   - hash: "sha256:<64 lowercase hex>"
+    length: 9
     hint: "former employer name"
 patterns:
   - regex: '/Users/[^/ ]+/'
     hint: "personal absolute path"
 ```
+
+### What hashing does and does not buy
+
+It must be stated plainly, because the rest of the design depends on not
+believing more than is true: **hashing the terms is obfuscation, not
+confidentiality.**
+
+Measured on this machine, a pure-Python single core tests 2.87M SHA-256
+candidates per second. A ten-million-entry wordlist of English words and brand
+names therefore falls in **3 seconds**, and about a millisecond on a GPU. The
+hashes are unsalted by necessity — the check must run in a fresh clone with no
+external key — so anyone who wants a redacted term back can have it.
+
+What hashing genuinely buys is worth having anyway:
+
+- the words are not greppable, not indexed by search engines, and not returned
+  by GitHub code search
+- a reader browsing the repository does not learn them incidentally
+- and, the actual point, a contributor cannot reintroduce one without CI
+  failing
+
+The primary purpose of this check is preventing reintroduction, and for that
+the hash strength is irrelevant. Confidentiality of the term itself is a
+secondary, weak property, and the spec claims nothing more. An adopter with a
+term that genuinely must stay secret should keep it in a private fork's
+denylist rather than trusting this file, and section 9 says so.
 
 Two sections, because the two kinds of forbidden content fail differently:
 
@@ -104,11 +132,27 @@ add their own private terms without publishing them.
 
 ### Matching semantics
 
-- **Terms.** File content is lowercased and tokenised per line with
-  `re.findall(r"[a-z0-9]+", line)`. Each token is SHA-256'd and compared
-  against the configured set. Tokenising rather than substring-matching means
-  `***REMOVED***-alerting` and `***REMOVED***.` both match the term `***REMOVED***`, while
-  a term never matches inside an unrelated longer word.
+- **Terms.** For each configured length `n`, the lowercased line is scanned as
+  overlapping `n`-grams: every window `line[i:i+n]` is SHA-256'd and compared
+  against the hashes configured at that length.
+
+  The obvious cheaper rule — tokenise on `[a-z0-9]+` and hash whole tokens —
+  was specified first and rejected on measurement. It misses a term embedded in
+  a longer alphanumeric run, which is exactly how one reappears in code:
+
+  | Input | token scan | `n`-gram scan |
+  | --- | --- | --- |
+  | `***REMOVED***-alerting` | hit | hit |
+  | `***REMOVED***.` | hit | hit |
+  | `***REMOVED***_RULES` | hit | hit |
+  | `***REMOVED***Alerting` | **miss** | hit |
+  | `***REMOVED***2` | **miss** | hit |
+
+  The `n`-gram scan costs 0.12s against this repository's 278k tracked
+  characters, versus 0.01s for tokens. Both are free; only one is correct.
+
+  Storing `length` is what makes the window sizable. It leaks the term's
+  length, which given the section above changes nothing material.
 - **Patterns.** `re.search(regex, line)` per line, case-sensitive.
 - **Findings** are `path:line: <hint>`. The matched text is never printed, for
   terms or for patterns: a pattern's match can itself be the private value.
@@ -149,10 +193,18 @@ make add-private-term
 ```
 
 Reads the term via `getpass`, so it reaches neither the shell history nor a
-terminal transcript, prompts for a hint on stdin normally, and appends the
-hashed entry. It refuses a term shorter than four characters, since a
-three-character term matches half the repository and the hash cannot be
-inspected afterwards to find out why.
+terminal transcript, prompts for a hint on stdin normally, and appends an entry
+carrying the hash, the length and the hint. It refuses a term shorter than four
+characters, since a three-character term matches half the repository as an
+`n`-gram and the hash cannot be inspected afterwards to find out why.
+
+When the new term already matches the tracked tree, it prints the number of
+matching files — never their contents — and warns that `make check` will now
+fail until they are cleaned up. It still writes the entry: section 7's build
+order depends on exactly this state being reachable, since observing the
+failure is what proves the check works against the real defect. The warning
+exists so that reaching it by accident is loud, not so that reaching it
+deliberately is blocked.
 
 This is the one place where the general rule against putting secrets on a
 command line has a supported alternative, and the Makefile target exists so
@@ -266,16 +318,22 @@ TDD throughout: failing test, observed failing, then implementation.
 
 New pytest coverage for the publishability check:
 
-- a term hash matching a token in a tracked file is reported
+- a term hash matching text in a tracked file is reported
 - the finding contains the hint and **not** the term or the matched text
-- a term does not match inside an unrelated longer word
+- a term embedded in a longer identifier is caught: the five inputs tabulated
+  in section 3 are the test cases, including the two the rejected token rule
+  missed
 - case-insensitivity: `***REMOVED***`, `***REMOVED***` and `***REMOVED***` all match
+- two terms of different lengths are both found in one file, so the per-length
+  window loop is exercised rather than only its first iteration
 - a pattern match is reported with its hint
 - `publishability.yaml` is exempt from patterns but not from terms
 - a binary file is skipped, and the skip is visible
 - a missing `publishability.yaml` fails
 - a malformed `publishability.yaml` fails: not a mapping, `terms` not a list,
-  an entry missing `hash` or `hint`, a hash that is not `sha256:` + 64 hex
+  an entry missing `hash`, `length` or `hint`, a hash that is not `sha256:` +
+  64 hex, a `length` that is not an integer of at least 4, a `regex` that does
+  not compile
 - an empty but well-formed config passes
 
 The existing 109 tests stay green. The final gate is `make check` exiting 0 on
@@ -288,6 +346,12 @@ it. It catches a configured term or pattern in a tracked file. It does not
 catch a private detail nobody thought to add to the denylist, a design decision
 that reveals something by its shape rather than its wording, or anything in an
 untracked file that a later `git add` would sweep in.
+
+It also does not keep the configured terms secret. Section 3 measures this: an
+unsalted SHA-256 of a dictionary word falls in seconds. A term whose secrecy
+actually matters does not belong in a published denylist at all; keep it in a
+private fork's copy of this file and accept that the public one is a weaker
+net.
 
 The honest claim is: the repository contains no configured private term, its
 history contains none, and reintroducing one fails the build. That is a
