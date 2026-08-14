@@ -1,13 +1,19 @@
 import base64
+import stat as stdlib_stat
+import textwrap
+from pathlib import Path
 
 import pytest
 
+import scripts.privatescan as privatescan
 from scripts.privatescan import (
+    DENYLIST_PLACEHOLDER,
     DenylistError,
     apply_mask,
     candidate_views,
     eligible_masks,
     find_term,
+    load_denylist,
     normalise,
 )
 
@@ -197,3 +203,207 @@ def test_scanning_a_large_file_is_not_quadratic():
     start = time.perf_counter()
     find_term(big, normalise(TERM))
     assert time.perf_counter() - start < 5.0
+
+
+# Task 5: load_denylist and its supporting validation.
+#
+# The property that matters most here is confidentiality of diagnostics: until
+# the denylist has parsed successfully, nothing derived from the
+# environment-supplied path, or from the file's own content, may appear in a
+# raised DenylistError. Every test below that exercises a pre-success error
+# path asserts the placeholder is present AND that the concrete secret-shaped
+# input is absent, not just that some expected word matched.
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+VALID = """\
+version: 1
+terms:
+  - id: private-term-01
+    value: "alphaterm"
+"""
+
+
+def write_denylist(tmp_path: Path, body: str, name: str = "denylist.yaml") -> Path:
+    path = tmp_path / name
+    path.write_text(textwrap.dedent(body), encoding="utf-8")
+    return path
+
+
+def test_valid_denylist_loads(tmp_path):
+    path = write_denylist(tmp_path, VALID)
+    terms = load_denylist({"PUBLISHABILITY_TERMS_FILE": str(path)}, REPO_ROOT)
+    assert [t["id"] for t in terms] == ["private-term-01"]
+
+
+def test_unset_variable_fails():
+    with pytest.raises(DenylistError, match="PUBLISHABILITY_TERMS_FILE"):
+        load_denylist({}, REPO_ROOT)
+
+
+def test_empty_variable_fails_the_same_way_as_unset():
+    """A present-but-empty value is exactly as unusable as an absent one;
+    env.get returning '' must not slip past the falsy check."""
+    with pytest.raises(DenylistError, match="PUBLISHABILITY_TERMS_FILE"):
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": ""}, REPO_ROOT)
+
+
+def test_missing_file_fails_without_printing_the_path(tmp_path):
+    secret_path = tmp_path / "alphaterm-denylist.yaml"
+    with pytest.raises(DenylistError) as exc:
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(secret_path)}, REPO_ROOT)
+    assert DENYLIST_PLACEHOLDER in str(exc.value)
+    assert "alphaterm" not in str(exc.value)
+    assert str(secret_path) not in str(exc.value)
+
+
+def test_denylist_inside_the_repository_fails(tmp_path):
+    inside = REPO_ROOT / "alphaterm-denylist.yaml"
+    inside.write_text(VALID, encoding="utf-8")
+    try:
+        with pytest.raises(DenylistError, match="inside the repository") as exc:
+            load_denylist({"PUBLISHABILITY_TERMS_FILE": str(inside)}, REPO_ROOT)
+        assert DENYLIST_PLACEHOLDER in str(exc.value)
+        assert str(inside) not in str(exc.value)
+        assert "alphaterm" not in str(exc.value)
+    finally:
+        inside.unlink()
+
+
+def test_symlinked_denylist_fails(tmp_path):
+    real = write_denylist(tmp_path, VALID, "alphaterm-real.yaml")
+    link = tmp_path / "alphaterm-link.yaml"
+    link.symlink_to(real)
+    with pytest.raises(DenylistError, match="symlink") as exc:
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(link)}, REPO_ROOT)
+    assert DENYLIST_PLACEHOLDER in str(exc.value)
+    assert str(link) not in str(exc.value)
+    assert str(real) not in str(exc.value)
+    assert "alphaterm" not in str(exc.value)
+
+
+def test_symlink_rejection_does_not_trust_an_earlier_stat(tmp_path, monkeypatch):
+    """lstat is a first, cheap check, not the guarantee. If it is bypassed (a
+    real validation-then-read race swaps the file between the lstat and the
+    open; here the check itself is replaced with one that always says "not a
+    symlink", scoped to this module only so nothing else in the test run is
+    affected), the file must still be refused. The only thing that can still
+    catch it is the kernel-level O_NOFOLLOW on the real open() call plus the
+    fstat on the descriptor that call actually returns: an implementation
+    that only lstat-checked before opening would let this symlink straight
+    through once its lstat-based guard stops saying so."""
+    real = write_denylist(tmp_path, VALID, "real.yaml")
+    link = tmp_path / "link.yaml"
+    link.symlink_to(real)
+
+    class _LyingStat:
+        S_ISREG = staticmethod(stdlib_stat.S_ISREG)
+        S_ISLNK = staticmethod(lambda mode: False)
+
+    monkeypatch.setattr(privatescan, "stat", _LyingStat)
+    with pytest.raises(DenylistError):
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(link)}, REPO_ROOT)
+
+
+def test_open_no_symlink_raises_denylisterror_not_oserror_when_the_file_vanishes(tmp_path):
+    """The validate-then-read race can also run the other way: the file is
+    gone by the time _open_no_symlink's own lstat runs, after an earlier
+    existence check already passed. That lstat call must convert OSError to
+    DenylistError like every other filesystem call in this module, not let a
+    bare FileNotFoundError escape as an uncaught traceback."""
+    missing = tmp_path / "gone" / "alphaterm-denylist.yaml"
+    with pytest.raises(DenylistError) as exc:
+        privatescan._open_no_symlink(missing)
+    assert DENYLIST_PLACEHOLDER in str(exc.value)
+    assert str(missing) not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ("[]", "mapping"),
+        ("version: 1\n", "exactly"),
+        ("version: 2\nterms: [{id: private-term-01, value: x}]\n", "version"),
+        ("version: 1\nterms: []\n", "non-empty"),
+        ("version: 1\nterms: [{id: bad-id, value: x}]\n", "id"),
+        ("version: 1\nterms: [{id: private-term-01}]\n", "exactly"),
+        ("version: 1\nterms: [{id: private-term-01, value: ''}]\n", "value"),
+        (
+            "version: 1\nterms: [{id: private-term-01, value: a},"
+            " {id: private-term-01, value: b}]\n",
+            "unique",
+        ),
+        (
+            "version: 1\nterms: [{id: private-term-01, value: 'Ab'},"
+            " {id: private-term-02, value: 'aB'}]\n",
+            "collide",
+        ),
+        ("version: 1\nversion: 1\nterms: [{id: private-term-01, value: x}]\n", "duplicate"),
+    ],
+)
+def test_malformed_denylist_fails(tmp_path, body, expected):
+    path = write_denylist(tmp_path, body)
+    with pytest.raises(DenylistError, match=expected):
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(path)}, REPO_ROOT)
+
+
+def test_term_deriving_to_empty_is_rejected(tmp_path):
+    """An empty derived term matches every string, so it must invalidate the
+    denylist rather than flag every file."""
+    path = write_denylist(
+        tmp_path,
+        "version: 1\nterms: [{id: private-term-01, value: '---'}]\n",
+    )
+    with pytest.raises(DenylistError, match="empty"):
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(path)}, REPO_ROOT)
+
+
+def test_denylist_values_never_appear_in_errors(tmp_path):
+    path = write_denylist(
+        tmp_path,
+        "version: 1\nterms: [{id: private-term-01, value: 'zebrasecret'},"
+        " {id: private-term-01, value: 'zebrasecret'}]\n",
+    )
+    with pytest.raises(DenylistError) as exc:
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(path)}, REPO_ROOT)
+    assert "zebrasecret" not in str(exc.value)
+
+
+def test_duplicate_key_error_does_not_echo_the_key_name(tmp_path):
+    """The shared loader's duplicate-key detector fires during YAML
+    construction, before this module's own schema check runs, so it can see
+    an arbitrary top-level key in a badly malformed file. Its message must
+    still not be forwarded verbatim: the key position is not guaranteed
+    non-secret just because a well-formed file only ever puts
+    'version'/'terms'/'id'/'value' there."""
+    path = write_denylist(
+        tmp_path,
+        "zzzinventedsecretkey: 1\nzzzinventedsecretkey: 2\nversion: 1\nterms: []\n",
+    )
+    with pytest.raises(DenylistError, match="duplicate") as exc:
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(path)}, REPO_ROOT)
+    assert "zzzinventedsecretkey" not in str(exc.value)
+
+
+def test_rejected_term_id_is_not_echoed(tmp_path):
+    """A term id is meant to be an opaque private-term-NN identifier, never
+    the term itself, but nothing stops a malformed file from putting
+    arbitrary text there instead. The rejection message must not echo it
+    back, on the same theory as the path and the YAML parser exception: the
+    error that reports a problem with the file must not become a new way to
+    read the file."""
+    path = write_denylist(
+        tmp_path,
+        "version: 1\nterms: [{id: 'zzzleakyidvalue', value: 'x'}]\n",
+    )
+    with pytest.raises(DenylistError, match="id") as exc:
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(path)}, REPO_ROOT)
+    assert "zzzleakyidvalue" not in str(exc.value)
+
+
+def test_non_utf8_denylist_fails_without_printing_the_bytes(tmp_path):
+    path = tmp_path / "denylist.yaml"
+    path.write_bytes(b"version: 1\nterms:\n  - id: private-term-01\n    value: \xff\xfe\n")
+    with pytest.raises(DenylistError, match="UTF-8") as exc:
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(path)}, REPO_ROOT)
+    assert DENYLIST_PLACEHOLDER in str(exc.value)

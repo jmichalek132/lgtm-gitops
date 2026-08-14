@@ -7,9 +7,14 @@ a matched substring, or the denylist path.
 from __future__ import annotations
 
 import base64
+import os
 import re
+import stat
 import unicodedata
-from typing import Iterator
+from pathlib import Path
+from typing import Iterator, Mapping
+
+import yaml
 
 
 class DenylistError(Exception):
@@ -152,3 +157,148 @@ def find_term(raw: str, normalised_term: str) -> tuple[str, tuple[str, ...]] | N
             if needle in apply_mask(mask, view):
                 return view_name, mask
     return None
+
+
+DENYLIST_ENV = "PUBLISHABILITY_TERMS_FILE"
+DENYLIST_PLACEHOLDER = "<denylist-path>"
+TERM_ID_RE = re.compile(r"^private-term-[0-9]{2,}$")
+
+
+def _open_no_symlink(path: Path) -> int:
+    """Open a regular file, refusing a symlink in a way that survives a
+    validation-then-read race.
+
+    lstat is a first, cheap check, not the guarantee: the file at `path`
+    could be replaced between that lstat and the open below. The actual
+    guarantee is O_NOFOLLOW on the open itself (the kernel refuses to
+    traverse a symlink for the final path component, race-free by
+    construction) together with fstat on the descriptor that call actually
+    returned, never on a stat taken beforehand.
+    """
+    try:
+        lst = path.lstat()
+    except OSError as exc:
+        raise DenylistError(
+            f"{DENYLIST_PLACEHOLDER} could not be checked: {exc.strerror}"
+        ) from exc
+    if stat.S_ISLNK(lst.st_mode):
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} is a symlink, which is not allowed")
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise DenylistError(
+            f"{DENYLIST_PLACEHOLDER} could not be opened: {exc.strerror}"
+        ) from exc
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} is not a regular file")
+    return fd
+
+
+def load_denylist(env: Mapping[str, str], repo_root: Path) -> list[dict]:
+    """Load and validate the out-of-repository denylist.
+
+    Until this returns successfully, the scanner has not checked
+    PUBLISHABILITY_TERMS_FILE against the denylist's own terms, so a path
+    that itself happens to contain a term could be echoed by the very error
+    meant to report the problem. Every diagnostic below therefore prints
+    DENYLIST_PLACEHOLDER, never the environment-supplied path, and never
+    forwards a parser exception's text verbatim: a YAML error can embed a
+    source line, and a source line can embed a term.
+    """
+    raw_path = env.get(DENYLIST_ENV)
+    if not raw_path:
+        raise DenylistError(
+            f"{DENYLIST_ENV} is not set. Gate 2 cannot run, and a scan that could "
+            f"not run is not a scan that found nothing."
+        )
+    path = Path(raw_path)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} does not exist or is not readable") from None
+
+    root = repo_root.resolve()
+    if resolved == root or root in resolved.parents:
+        raise DenylistError(
+            f"{DENYLIST_PLACEHOLDER} is inside the repository. The denylist holds "
+            f"plaintext terms and must never be committable."
+        )
+
+    fd = _open_no_symlink(path)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except UnicodeDecodeError:
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} is not UTF-8") from None
+
+    # Deferred, not module-level: scripts/rulecheck.py is expected to import
+    # iter_scannable_files from this module at module level once that
+    # consolidation lands (see its TEMPORARY stand-in docstring), which would
+    # make a module-level import back into rulecheck here a circular import.
+    # A deferred import breaks the cycle regardless of which module a caller
+    # imports first: by the time load_denylist actually runs, both modules
+    # have finished their own top-level execution, so the name lookup below
+    # always succeeds. Verified for both import orders before relying on it.
+    from scripts.rulecheck import PublishabilityConfigError, _NoDuplicateKeyLoader
+
+    try:
+        docs = list(yaml.load_all(text, Loader=_NoDuplicateKeyLoader))
+    except PublishabilityConfigError:
+        # The shared loader's duplicate-key constructor raises this directly,
+        # not a yaml.YAMLError, so it needs its own branch: falling through to
+        # the except below would report "not valid YAML" and lose the word
+        # "duplicate" a caller may be matching on. Its own message names only
+        # a YAML mapping key, never a source line, but that text is still not
+        # forwarded: a badly malformed file can put arbitrary content in a
+        # key position too, and a key is not guaranteed non-secret just
+        # because a well-formed file only ever puts a fixed vocabulary there.
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} has a duplicate key") from None
+    except Exception:
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} is not valid YAML") from None
+
+    if len(docs) != 1:
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} must contain exactly one YAML document")
+    doc = docs[0]
+    if not isinstance(doc, dict):
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} must be a mapping")
+    if set(doc) != {"version", "terms"}:
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} root must have exactly 'version' and 'terms'")
+    version = doc["version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} version must be the integer 1")
+    terms = doc["terms"]
+    if not isinstance(terms, list) or not terms:
+        raise DenylistError(f"{DENYLIST_PLACEHOLDER} terms must be a non-empty list")
+
+    seen_ids: set[str] = set()
+    seen_norm: set[str] = set()
+    for entry in terms:
+        if not isinstance(entry, dict) or set(entry) != {"id", "value"}:
+            raise DenylistError("each term must have exactly 'id' and 'value'")
+        tid, value = entry["id"], entry["value"]
+        if not isinstance(tid, str) or not TERM_ID_RE.match(tid):
+            raise DenylistError(
+                f"a term id does not match {TERM_ID_RE.pattern!r}. Ids are opaque "
+                f"on purpose: a descriptive id re-creates the crib it exists to avoid, "
+                f"so a rejected id is not echoed back here."
+            )
+        if not isinstance(value, str) or not value:
+            raise DenylistError(f"term {tid} value must be a non-empty string")
+        if tid in seen_ids:
+            raise DenylistError(f"term ids must be unique, {tid!r} repeats")
+        normalised = normalise(value)
+        if normalised in seen_norm:
+            raise DenylistError("two terms collide after normalisation")
+        for mask in eligible_masks(normalised):
+            if not apply_mask(mask, normalised):
+                raise DenylistError(
+                    f"term {tid} derives to the empty string under mask {mask}, which "
+                    f"would match every file"
+                )
+        seen_ids.add(tid)
+        seen_norm.add(normalised)
+    return terms
