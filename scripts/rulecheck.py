@@ -247,16 +247,32 @@ def iter_scannable_files(root: Path):
     from one that ran and found nothing clean, exactly the failure mode
     this repository exists to prevent. So this reads real tracked and
     untracked-but-not-ignored files with `git ls-files` and actually scans
-    their content. It does not attempt Task 8's fuller edge-case handling
-    (redaction, duplicate or escaped-path detection, gitlinks).
+    their content, and every problem path (discovery failure, symlink,
+    unreadable, binary, non-UTF-8) is yielded as an already-formatted
+    finding via the "{path}: ..." prefix convention `check_publishability`
+    matches on, rather than silently dropped.
+
+    Known gaps Task 8's real implementation must still cover, left out here
+    deliberately to keep this stand-in small: duplicate-path detection as
+    its own finding (this walks `sorted(set(paths))`, so a duplicate just
+    collapses silently instead of being reported); path-escape detection
+    for a path that resolves outside `root`; distinguishing "discovered but
+    missing" (the path was listed by git but is gone by the time this
+    reads it) from "gitlink or non-regular file" as two separate findings,
+    rather than the single silent `continue` this uses for anything that
+    is not a regular file; and reporting `OSError.strerror` specifically
+    in the unreadable-file finding rather than the whole exception object.
     """
     paths = _git_scannable_paths(root)
     if paths is None:
-        yield "", "file discovery failed, so nothing was scanned (git ls-files did not run)"
+        yield "<repository>", "<repository>: file discovery failed, so nothing was scanned (git ls-files did not run)"
         return
     for rel in sorted(set(paths)):
         full = root / rel
-        if full.is_symlink() or not full.is_file():
+        if full.is_symlink():
+            yield rel, f"{rel}: symlink, which is not scannable and not allowed"
+            continue
+        if not full.is_file():
             continue
         try:
             data = full.read_bytes()
@@ -279,11 +295,11 @@ def check_publishability(root: Path) -> list[str]:
         return [str(exc)]
     findings: list[str] = []
     for path, text in iter_scannable_files(root):
-        if isinstance(text, str):
+        if text.startswith(f"{path}:"):
+            findings.append(text)  # a discovery finding, already formatted
+        else:
             active = [p for p in patterns if not p.get("_disabled")]
             findings.extend(scan_text_with_patterns(path, text, active))
-        else:
-            findings.append(text)  # a discovery finding, already formatted
     return findings
 
 

@@ -952,3 +952,12 @@ def test_codeowners_gives_publishability_to_platform(tmp_path):
                + "/publishability.yaml @org/payments\n")
     findings = rulecheck.check_codeowners(tmp_path)
     assert any("publishability" in f for f in findings)
+
+
+def test_codeowners_publishability_resists_a_wildcard_override(tmp_path):
+    governed_repo(tmp_path)
+    (tmp_path / "publishability.yaml").write_text("version: 1\npatterns: []\n")
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/publishability.yaml @org/platform\n/publish*.yaml @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("publishability" in f and "@org/payments" in f for f in findings)

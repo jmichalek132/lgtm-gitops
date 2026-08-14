@@ -237,3 +237,19 @@ def test_gate1_passes_on_the_real_repository():
     # keeps guarding the same property either way, so no marker is needed
     # once the dependency exists and the repository is actually clean.
     assert check_publishability(REPO_ROOT) == []
+
+
+def test_symlink_is_never_silently_skipped(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    write_config(tmp_path, "version: 1\npatterns: [{id: a, regex: x, message: y}]\n")
+    (tmp_path / "target.txt").write_text("hello", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(tmp_path / "target.txt")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    assert any("link.txt" in f and "symlink" in f for f in check_publishability(tmp_path))
+
+
+def test_discovery_failure_is_a_finding_not_an_empty_pass(tmp_path):
+    write_config(tmp_path, "version: 1\npatterns: [{id: a, regex: x, message: y}]\n")
+    findings = check_publishability(tmp_path)  # not a git repo: ls-files fails
+    assert findings and "discovery failed" in findings[0]
