@@ -1,0 +1,23 @@
+groups:
+  - name: checkout
+    rules:
+      - alert: CheckoutErrorRateHigh
+        expr: |
+          sum by (service) (
+            rate(checkout_requests_total{deployment_environment=~"dev|staging|prod",status=~"5.."}[5m])
+          )
+          /
+          sum by (service) (
+            rate(checkout_requests_total{deployment_environment=~"dev|staging|prod"}[5m])
+          )
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          owner: payments
+        annotations:
+          summary: "Checkout error rate above 5 percent for {{ $labels.service }}"
+          description: >-
+            More than 5 percent of checkout requests have failed for 10 minutes.
+            Check the upstream payment provider before rolling back.
+          runbook_url: "https://runbooks.internal/payments/checkout-error-rate"

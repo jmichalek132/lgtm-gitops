@@ -37,3 +37,5 @@
 # are required for every team, and rulecheck.py fails the build without them.
 /rules/platform/ @org/platform
 /dashboards/platform/ @org/platform
+/rules/payments/ @org/payments
+/dashboards/payments/ @org/payments

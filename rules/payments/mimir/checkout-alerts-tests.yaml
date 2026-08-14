@@ -1,0 +1,39 @@
+rule_files:
+  - checkout-alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # Firing: 10 percent of requests fail, which is above the 5 percent threshold.
+  - interval: 1m
+    input_series:
+      - series: 'checkout_requests_total{deployment_environment="prod",service="checkout",status="500"}'
+        values: '0+1x20'
+      - series: 'checkout_requests_total{deployment_environment="prod",service="checkout",status="200"}'
+        values: '0+9x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CheckoutErrorRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              owner: payments
+              service: checkout
+            exp_annotations:
+              summary: "Checkout error rate above 5 percent for checkout"
+              description: >-
+                More than 5 percent of checkout requests have failed for 10 minutes.
+                Check the upstream payment provider before rolling back.
+              runbook_url: "https://runbooks.internal/payments/checkout-error-rate"
+
+  # Not firing: 1 percent of requests fail, which is below the threshold.
+  - interval: 1m
+    input_series:
+      - series: 'checkout_requests_total{deployment_environment="prod",service="checkout",status="500"}'
+        values: '0+1x20'
+      - series: 'checkout_requests_total{deployment_environment="prod",service="checkout",status="200"}'
+        values: '0+99x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CheckoutErrorRateHigh
+        exp_alerts: []
