@@ -29,6 +29,17 @@ assert_count "$OUT" "name: platform-platform-mimir-deadman-alerts" 1 \
   "platform deadman rule renders exactly one ConfigMap"
 assert_count "$OUT" "name: platform-payments-mimir-checkout-alerts" 1 \
   "payments checkout rule renders exactly one ConfigMap"
+# The per-team path, asserted for the SECOND team and not only for platform.
+# Every label and annotation assertion above is about the one team whose folder
+# name also happens to be the tenant, so a template that hardcoded "platform",
+# or that read the wrong segment of the source path, would satisfy all of them
+# and still be broken for every team that came after. These two are the
+# assertions that fail when the team stops being derived from the file's own
+# location, which is the whole point of a per-team layout.
+assert_contains "$OUT" 'team: "payments"' \
+  "team label is derived per file, not fixed to one team"
+assert_contains "$OUT" 'observability-rules/source-path: "rules/payments/mimir/checkout-alerts.yaml"' \
+  "source-path annotation records the second team's origin"
 
 echo "chart: fail-closed guards"
 
