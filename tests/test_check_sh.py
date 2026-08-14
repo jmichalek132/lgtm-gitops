@@ -141,6 +141,41 @@ def test_check_sh_fails_when_rule_discovery_fails(tmp_path):
 # already covers.
 
 
+@pytest.fixture
+def synthetic_denylist(tmp_path) -> Path:
+    """A valid denylist outside any repository, holding a synthetic term
+    that appears nowhere in this checkout.
+
+    Without one, a test that only asserts "the run failed" passes for the
+    wrong reason: an absent PUBLISHABILITY_TERMS_FILE fails
+    scripts/privatescan.py by itself, since Gate 2 is fail-closed, so a
+    non-zero exit is guaranteed regardless of whether the check.sh branch
+    actually under test even ran. Two of check.sh's own mutants survived
+    exactly this way (M14, M16): the branch they broke was never exercised,
+    because the missing-denylist failure masked it. A synthetic, working
+    denylist removes that confound.
+
+    The literal term below necessarily appears in THIS file too, since
+    repo_copy copies the whole working tree, including this test file, into
+    the tree check.sh actually scans: writing the term any other way (e.g.
+    split across a concatenation) does not avoid that, because Gate 2's own
+    punctuation/symbol mask is specifically built to catch exactly that kind
+    of split (confirmed empirically). That self-reference is harmless for
+    every test that uses this fixture: each one exercises a check.sh branch
+    that is taken before scripts/privatescan.py is ever invoked under
+    correct behaviour, and asserts on that branch's own message text, not on
+    scan cleanliness. It only matters if a mutant makes control fall through
+    to the real scanner, in which case the self-match is incidental and the
+    assertion on the missing branch-specific text still fails correctly.
+    """
+    path = tmp_path / "synthetic-denylist.yaml"
+    path.write_text(
+        'version: 1\nterms:\n  - id: private-term-01\n    value: "zzzchecktestterm"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_check_sh_fails_when_denylist_is_absent(repo_copy):
     env = dict(os.environ)
     env.pop("PUBLISHABILITY_TERMS_FILE", None)
@@ -164,14 +199,28 @@ def test_check_sh_honours_the_named_skip_only_under_ci(repo_copy):
     assert run_check_sh(repo_copy, env).returncode != 0
 
 
-def test_check_sh_rejects_any_other_skip_value(repo_copy):
+@requires_toolchain
+def test_check_sh_rejects_any_other_skip_value(repo_copy, synthetic_denylist):
     env = dict(os.environ)
-    env.pop("PUBLISHABILITY_TERMS_FILE", None)
+    env["PUBLISHABILITY_TERMS_FILE"] = str(synthetic_denylist)
     env["PUBLISHABILITY_PRIVATE_SCAN"] = "yes"
     env["CI"] = "true"
     result = run_check_sh(repo_copy, env)
     assert result.returncode != 0
-    assert "CHECKS FAILED" in result.stdout + result.stderr
+    assert "is not a recognised value" in result.stdout + result.stderr
+
+
+@requires_toolchain
+def test_check_sh_rejects_the_named_skip_without_ci_even_with_a_denylist(
+    repo_copy, synthetic_denylist
+):
+    env = dict(os.environ)
+    env["PUBLISHABILITY_TERMS_FILE"] = str(synthetic_denylist)
+    env["PUBLISHABILITY_PRIVATE_SCAN"] = "skip-untrusted-ci"
+    env.pop("CI", None)
+    result = run_check_sh(repo_copy, env)
+    assert result.returncode != 0
+    assert "only accepted when CI=true" in result.stdout + result.stderr
 
 
 @requires_toolchain
