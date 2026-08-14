@@ -51,6 +51,17 @@ def test_missing_config_fails(tmp_path):
         load_publishability_config(tmp_path)
 
 
+def test_missing_config_error_does_not_leak_the_absolute_path(tmp_path):
+    """Gate 1 findings are public: check_publishability returns str(exc)
+    verbatim, and that reaches CI logs and stdout everywhere. The absolute
+    path this error used to embed is `root / PUBLISHABILITY_FILE`, which on
+    a contributor's own machine ordinarily contains their home directory,
+    exactly the shape Gate 1 exists to catch."""
+    with pytest.raises(PublishabilityConfigError) as exc:
+        load_publishability_config(tmp_path)
+    assert str(tmp_path) not in str(exc.value)
+
+
 @pytest.mark.parametrize(
     "body, expected",
     [
@@ -124,6 +135,23 @@ def test_invalid_yaml_syntax_fails(tmp_path):
     root = write_config(tmp_path, "version: 1\npatterns: [{id: a, regex: x, message: y}\n")
     with pytest.raises(PublishabilityConfigError, match="valid YAML"):
         load_publishability_config(root)
+
+
+def test_invalid_yaml_syntax_error_does_not_forward_the_parser_exception_text(tmp_path):
+    """A yaml.YAMLError's own str() can embed a snippet of the offending
+    source line. A badly malformed publishability.yaml could put a personal
+    path or other content there, and Gate 1's findings are public, so the
+    parser exception's text must never be forwarded verbatim.
+
+    The marker is built by concatenation, not written as one literal, so it
+    never appears as a matchable substring of THIS tracked test file (which
+    Gate 1 also scans for real, over the actual repository)."""
+    marker = "zzz" + "notarealuser" + "secretshaped"
+    body = "version: 1\npatterns: [{id: a, regex: '" + marker + "\nmessage: y}\n"
+    root = write_config(tmp_path, body)
+    with pytest.raises(PublishabilityConfigError) as exc:
+        load_publishability_config(root)
+    assert marker not in str(exc.value)
 
 
 @pytest.mark.parametrize(

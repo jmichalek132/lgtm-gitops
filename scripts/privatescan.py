@@ -510,6 +510,23 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
             continue
         seen.add(rel)
 
+        # REPO_MARKER is the key this generator itself uses for a
+        # whole-repository finding (root-resolve failure, discovery
+        # failure, zero files). It is not a reserved path: a real tracked
+        # file could be named exactly "<repository>". DiscoveryFinding
+        # already stops that file's content from being mistaken for one of
+        # this generator's own findings, but a REAL discovery finding keyed
+        # to REPO_MARKER and one about a file actually named REPO_MARKER
+        # would still share that same key, which is confusing for any
+        # caller keying off the path. Reject the path outright instead.
+        if rel == REPO_MARKER:
+            yield rel, DiscoveryFinding(
+                f"{rel}: a tracked or untracked path is literally named "
+                f"{REPO_MARKER!r}, the marker this generator reserves for "
+                f"whole-repository findings, and is rejected rather than scanned"
+            )
+            continue
+
         full = root / rel
         try:
             resolved = full.resolve()

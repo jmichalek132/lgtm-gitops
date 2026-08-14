@@ -608,6 +608,20 @@ def test_symlink_is_a_finding(tmp_path):
     assert any("symlink" in text for _, text in findings)
 
 
+def test_a_file_literally_named_repo_marker_is_rejected_not_scanned(tmp_path):
+    """REPO_MARKER ("<repository>") is the key this generator uses for its
+    own whole-repository findings, not a reserved path. A real file with
+    that exact name must not be scanned as ordinary content: DiscoveryFinding
+    already stops its content from being mistaken for a discovery finding,
+    but a genuine whole-repository finding and one about this file would
+    still collide on the same key. Reject the path instead."""
+    repo = _git_repo(tmp_path)
+    (repo / privatescan.REPO_MARKER).write_text("clean", encoding="utf-8")
+    findings = dict(iter_scannable_files(repo))
+    assert privatescan.REPO_MARKER in findings[privatescan.REPO_MARKER]
+    assert isinstance(findings[privatescan.REPO_MARKER], privatescan.DiscoveryFinding)
+
+
 def test_untracked_non_ignored_file_is_scanned(tmp_path):
     repo = _git_repo(tmp_path)
     (repo / "new.txt").write_text("zephyrgate", encoding="utf-8")

@@ -67,9 +67,18 @@ _NoDuplicateKeyLoader.add_constructor(
 
 
 def load_publishability_config(root: Path) -> list[dict]:
+    # Gate 1's own findings are PUBLIC: check_publishability returns
+    # str(exc) verbatim, and that reaches CI logs and stdout everywhere,
+    # including the public-checks job. `path` is `root / PUBLISHABILITY_FILE`,
+    # an absolute filesystem path that on a contributor's own machine
+    # ordinarily contains their home directory, exactly the shape Gate 1
+    # exists to catch. A yaml.YAMLError's own str() can likewise embed a
+    # snippet of the offending source line. Neither is forwarded below, on
+    # the same theory scripts/privatescan.py's load_denylist already applies
+    # to its own (private, not merely personal) diagnostics.
     path = root / PUBLISHABILITY_FILE
     if not path.is_file():
-        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} not found at {path}")
+        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} not found")
     try:
         raw = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
@@ -77,7 +86,7 @@ def load_publishability_config(root: Path) -> list[dict]:
     try:
         docs = list(yaml.load_all(raw, Loader=_NoDuplicateKeyLoader))
     except yaml.YAMLError as exc:
-        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} is not valid YAML: {exc}") from exc
+        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} is not valid YAML") from exc
     if len(docs) != 1:
         raise PublishabilityConfigError(
             f"{PUBLISHABILITY_FILE} must contain exactly one YAML document, found {len(docs)}"
@@ -203,6 +212,18 @@ def scan_text_with_patterns(
     path: str, text: str, patterns: list[dict], deadline: float = PUBLISHABILITY_DEADLINE_SECONDS
 ) -> list[str]:
     """Scan `text` against every pattern, returning `path:line: message` findings.
+
+    WARNING for callers embedding this in something other than this
+    module's own CLI: each pattern-file match spawns a worker process (see
+    `_search_with_deadline`), and multiprocessing's "spawn" context needs to
+    re-import `__main__` in the child. A caller whose `__main__` is not
+    safely re-importable (no `if __name__ == "__main__":` guard around
+    top-level side effects, or a `__main__` that is not a real importable
+    module at all, e.g. a frozen executable or certain embeddings) makes
+    every worker die before producing a result. Since Task 8's fix, that
+    surfaces as an 'error' finding naming the exit code rather than a false
+    "matching deadline", but it still means no pattern the caller passes in
+    is ever actually evaluated.
 
     A pattern that trips the deadline is marked `pattern["_disabled"] = True`
     IN PLACE on the caller's dict, and this function does not itself check

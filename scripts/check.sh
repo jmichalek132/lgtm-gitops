@@ -166,7 +166,7 @@ if require helm; then
   run python3 scripts/render_assert.py
 fi
 
-stage "8. private term scan (Gate 2)"
+stage "7. private term scan (Gate 2)"
 # Gate 2 is fail-closed. An absent denylist is a FAILURE, not a caveat: the
 # caveat mechanism exits 0, so Make, Actions and pre-push hooks would all read
 # "could not run" as success.

@@ -176,6 +176,7 @@ def synthetic_denylist(tmp_path) -> Path:
     return path
 
 
+@requires_toolchain
 def test_check_sh_fails_when_denylist_is_absent(repo_copy):
     env = dict(os.environ)
     env.pop("PUBLISHABILITY_TERMS_FILE", None)

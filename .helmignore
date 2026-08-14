@@ -32,6 +32,8 @@ README.md
 dashboards/
 docs/
 examples/
+ownership.yaml
+publishability.yaml
 requirements.txt
 scripts/
 tests/
