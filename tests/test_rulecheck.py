@@ -290,6 +290,43 @@ def test_fixtures_accepts_a_rule_files_entry_that_exists(tmp_path):
     assert rulecheck.check_fixtures(tmp_path) == []
 
 
+# The quotes are not decoration. A bare `- *-alerts.yaml` is a YAML ALIAS, not a
+# string, and PyYAML rejects it before check_fixtures ever sees a rule_files list,
+# so an unquoted glob would test the error path for unparseable YAML instead of
+# the glob path. Anyone writing a glob in a real fixture has to quote it too.
+GLOB_FIXTURE = FIXTURE.replace("- a-alerts.yaml", '- "*-alerts.yaml"')
+
+
+def test_fixtures_accepts_a_rule_files_glob_promtool_would_expand(tmp_path):
+    # promtool glob-expands rule_files, so rejecting a glob fails a layout the
+    # tool this check models accepts. Verified with promtool 3.13.2: a directory
+    # holding r-alerts.yaml and a fixture naming "*-alerts.yaml" reports SUCCESS
+    # and exits 0. One fixture per target directory is a legitimate layout for
+    # anyone copying this example, and an existence test outlaws it.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", GLOB_FIXTURE)
+    assert rulecheck.check_fixtures(tmp_path) == []
+
+
+def test_fixtures_rejects_a_rule_files_glob_matching_nothing(tmp_path):
+    # The orphan case survives glob support. promtool prints
+    # "WARNING: no file match pattern *-alerts.yaml", loads nothing, and every
+    # expected alert then fails, so accepting a glob must not mean accepting one
+    # that resolves to no rule file at all.
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", GLOB_FIXTURE)
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert any("*-alerts.yaml" in f and "does not exist" in f for f in findings)
+
+
+def test_fixtures_rejects_a_rule_files_glob_matching_only_a_directory(tmp_path):
+    # A glob matches directories too, and promtool cannot load one as a rule
+    # file, so a match is not on its own evidence that any rule exists.
+    (tmp_path / "rules/payments/mimir/a-alerts.yaml").mkdir(parents=True)
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", GLOB_FIXTURE)
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert any("*-alerts.yaml" in f and "does not exist" in f for f in findings)
+
+
 def test_fixtures_reports_unparseable_yaml(tmp_path):
     write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", "tests: [\n")
     findings = rulecheck.check_fixtures(tmp_path)

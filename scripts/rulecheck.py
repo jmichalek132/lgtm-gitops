@@ -16,6 +16,7 @@ human-readable findings. An empty list means the check passed.
 
 from __future__ import annotations
 
+import glob
 import json
 import multiprocessing
 import re
@@ -553,12 +554,40 @@ def check_fixtures(root: Path) -> list[str]:
                     f"{rel}: 'rule_files' entry {entry!r} is not a usable relative path"
                 )
                 continue
-            if not (path.parent / entry).is_file():
+            # promtool glob-expands every rule_files entry, so an existence test
+            # is the wrong model and rejects a layout promtool accepts: one
+            # fixture per target directory naming "*-alerts.yaml". Verified with
+            # promtool 3.13.2, in a directory holding r-alerts.yaml and a fixture
+            # naming "*-alerts.yaml": SUCCESS, exit 0. A literal path holds no
+            # magic characters, so glob() degenerates to an existence test and
+            # one call covers both spellings.
+            #
+            # root_dir, rather than gluing entry onto str(path.parent), because
+            # the entry is the only thing that may be a pattern. A clone living
+            # under a directory whose name contains '*', '?' or '[' would
+            # otherwise have its own path reinterpreted as glob syntax, silently
+            # changing which files a literal entry matches. This also mirrors
+            # promtool, which resolves the entry against the fixture's own
+            # directory even when invoked from elsewhere (verified: running
+            # `promtool test rules sub/r-alerts-tests.yaml` from the parent
+            # still found sub/r-alerts.yaml).
+            #
+            # include_hidden, because Go's filepath.Glob matches a leading dot
+            # with '*' and Python's glob does not (verified: a fixture naming
+            # "*-alerts.yaml" beside only .hidden-alerts.yaml is SUCCESS under
+            # promtool 3.13.2). Without it this check would report a rule file
+            # that promtool loads perfectly well as missing.
+            #
+            # is_file, because a glob matches directories too and promtool
+            # cannot load one as a rule file.
+            matches = glob.glob(entry, root_dir=path.parent, include_hidden=True)
+            if not any((path.parent / match).is_file() for match in matches):
                 findings.append(
                     f"{rel}: 'rule_files' names '{entry}', which does not exist relative "
-                    f"to this fixture's own directory. promtool would fail to load it, "
-                    f"and this is exactly what an orphaned fixture looks like once its "
-                    f"rule file has been deleted."
+                    f"to this fixture's own directory, as a literal path or as a glob. "
+                    f"promtool would load no rules from it, so every alert the fixture "
+                    f"expects is missing, and this is exactly what an orphaned fixture "
+                    f"looks like once its rule file has been deleted."
                 )
 
     return findings
