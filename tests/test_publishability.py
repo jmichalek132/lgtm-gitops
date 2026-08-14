@@ -230,6 +230,10 @@ def test_large_result_completes_well_inside_the_deadline_with_correct_lines():
     assert findings[-1] == f"x.txt:{match_count}: probe"
 
 
-@pytest.mark.xfail(reason="iter_scannable_files arrives in Task 8", strict=True)
 def test_gate1_passes_on_the_real_repository():
+    # `iter_scannable_files` was missing until Task 4's temporary stand-in
+    # (scripts/rulecheck.py), which this now exercises for real. Task 8
+    # replaces that stand-in with the shared implementation; this assertion
+    # keeps guarding the same property either way, so no marker is needed
+    # once the dependency exists and the repository is actually clean.
     assert check_publishability(REPO_ROOT) == []
