@@ -1,12 +1,14 @@
 # Destructive Cutover Runbook
 
 > **This is NOT an implementation plan and MUST NOT be executed by a subagent.**
-> It rewrites all history and deletes a remote. It is performed once, attended,
-> by the operator, with an explicit go/no-go at each gate. An agent may prepare
-> commands and read output; the operator runs every step that destroys or
-> publishes.
+> It rewrites all history, force-pushes over a remote, and creates a public
+> repository. It is performed once, attended, by the operator, with an explicit
+> go/no-go at each gate. An agent may prepare commands and read output; the
+> operator runs every step that overwrites or publishes.
 
-**Goal:** replace the private remote with a sanitised public repository whose history contains no private term, then install branch protection.
+**Goal:** rewrite the private repository's history so it contains no private term, then publish that rewritten history as a new public repository with branch protection installed.
+
+The private repository is force-pushed and stays private. It is never deleted, and its visibility is never flipped. Publication happens into a separate new repository, which is built from the rewritten commits and therefore never contains the pre-rewrite objects at all. See "Residual exposure" at the end.
 
 **Spec:** `docs/superpowers/specs/2026-08-14-publishable-example-design.md` section 6.
 
@@ -26,25 +28,13 @@ Redaction in the freeze report prevents direct emission of matching characters. 
 
 ---
 
-## Gate 0: obtain the delete_repo scope
+## Gate 0: nothing to do
 
-The current token carries `gist`, `read:org` and `repo`. Deleting a repository needs `delete_repo`, and acquiring it is interactive.
+An earlier draft required the `delete_repo` token scope, because it deleted and
+recreated the remote rather than force-pushing. That was dropped as
+disproportionate. No extra scope is needed; the existing `repo` scope is enough.
 
-**Operator runs, in their own terminal:**
-
-```bash
-gh auth refresh -h github.com -s delete_repo
-```
-
-Verify:
-
-```bash
-gh auth status
-```
-
-Expected: the scope list now includes `delete_repo`.
-
-**If the scope cannot be obtained, STOP.** Do not fall back to a force-push. A force-push leaves the old objects reachable by SHA through the API, which is the exposure this cutover exists to remove. Report the blockage and abandon the cutover until the scope is available.
+See "Residual exposure" at the end for what this trades away.
 
 ---
 
@@ -157,19 +147,24 @@ gh pr list --repo jmichalek132/lgtm-gitops --state all
 
 Expected: zero issues, forks, stars and pull requests. If any exist, stop and decide explicitly what happens to them; this runbook assumes none.
 
-- [ ] **Delete and recreate**
-
-Deletion is not erasure: GitHub documents deleted repositories as restorable for 90 days. This reduces exposure rather than guaranteeing against it, and **the account holder must not restore the old repository.**
+- [ ] **Force-push the rewritten history**
 
 ```bash
-gh repo delete jmichalek132/lgtm-gitops --yes
-gh repo create jmichalek132/lgtm-gitops --private
 cd "$SCRATCH/cutover.git"
-git remote add fresh git@github.com:jmichalek132/lgtm-gitops.git
-git push --mirror fresh
+git push --mirror --force origin
 ```
 
-Recreate it **private** first. Publication is the next gate, and it is separate so that a failed verification does not leave a public repository behind.
+The repository stays **private**. Publication is the next gate, and it is
+separate so that a failed verification does not leave a public repository
+behind.
+
+This replaces an earlier draft that deleted and recreated the remote. The
+deletion existed to remove the pre-rewrite objects, which a force-push leaves
+behind as unreachable objects, fetchable by SHA through the API until GitHub
+garbage-collects them. That was judged disproportionate for a private,
+single-contributor repository with no forks or pull requests. See "Residual
+exposure" at the end of this runbook, which states plainly what is being
+accepted and names the cheap mitigation if the calculus changes.
 
 - [ ] **Verify from a fresh clone**
 
@@ -192,16 +187,33 @@ Rerun the full freeze scan against this clone as well.
 
 Branch protection is unavailable while the repository is private: both `POST /repos/{owner}/{repo}/rulesets` and `PUT /repos/{owner}/{repo}/branches/main/protection` return HTTP 403, `"Upgrade to GitHub Pro or make this repository public to enable this feature."` Publication is therefore what makes protection possible, and protection must follow immediately.
 
-- [ ] **Make it public**
+- [ ] **Publish into a NEW repository, do not flip this one's visibility**
 
 ```bash
-gh repo edit jmichalek132/lgtm-gitops --visibility public --accept-visibility-change-consequences
+gh repo create jmichalek132/<public-name> --public
+cd "$SCRATCH/cutover.git"
+git remote add public git@github.com:jmichalek132/<public-name>.git
+git push --mirror public
 ```
+
+Ask the operator for `<public-name>` rather than choosing one. It may well be
+`lgtm-gitops` under a different owner, or a different name entirely, and a
+repository name is not something to guess.
+
+**Do not run `gh repo edit --visibility public` on the existing repository.**
+Gate 3 force-pushed, so `lgtm-gitops` still holds the pre-rewrite objects as
+unreachable objects. Flipping its visibility would move those objects into a
+public repository, which is exactly the exposure this cutover exists to remove.
+The new repository is built from the rewritten commits only and never contains
+them.
+
+From here on, every command in this gate targets `<public-name>`, not
+`lgtm-gitops`. The private repository keeps its history and stays private.
 
 - [ ] **Install the ruleset**
 
 ```bash
-gh api -X POST repos/jmichalek132/lgtm-gitops/rulesets --input "$SCRATCH/ruleset.json"
+gh api -X POST repos/jmichalek132/<public-name>/rulesets --input "$SCRATCH/ruleset.json"
 ```
 
 Where `ruleset.json` requires: pull requests, the `public-checks` status context, dismissal of stale approvals, an up-to-date branch, and blocked force pushes and deletion. CODEOWNER approval is required only once the repository names owners GitHub can resolve; until `ownership.yaml` is configured with a real organisation, requiring it would block every merge on reviewers who do not exist.
@@ -211,8 +223,8 @@ Note the context is `public-checks`, not `check`. The CI job was renamed to stat
 - [ ] **Read the ruleset back**
 
 ```bash
-gh api repos/jmichalek132/lgtm-gitops/rulesets --jq '.[].name'
-gh api repos/jmichalek132/lgtm-gitops/rulesets/<id> --jq '.rules'
+gh api repos/jmichalek132/<public-name>/rulesets --jq '.[].name'
+gh api repos/jmichalek132/<public-name>/rulesets/<id> --jq '.rules'
 ```
 
 Expected: the rules as written. Updating `docs/branch-protection.md` is not acceptance; reading the live ruleset back is.
@@ -226,7 +238,7 @@ Open a pull request containing a harmless synthetic Gate 1 failure, for example 
 3. an API merge attempt is refused without bypass:
 
 ```bash
-gh api -X PUT repos/jmichalek132/lgtm-gitops/pulls/<n>/merge  # expect: refused
+gh api -X PUT repos/jmichalek132/<public-name>/pulls/<n>/merge  # expect: refused
 ```
 
 Then close the pull request and delete its branch.
@@ -234,7 +246,7 @@ Then close the pull request and delete its branch.
 **If protection cannot be installed or verified, make the repository private again immediately:**
 
 ```bash
-gh repo edit jmichalek132/lgtm-gitops --visibility private --accept-visibility-change-consequences
+gh repo edit jmichalek132/<public-name> --visibility private --accept-visibility-change-consequences
 ```
 
 Without protection, a pull request can modify the scanner, its configuration, the Makefile and the workflow in the same commit that adds forbidden content, and the required check then runs the contributor's version of itself.
@@ -260,5 +272,25 @@ In the repository, note the cutover date and the fact that history was rewritten
 ## Standing obligations after cutover
 
 - **No outside pull requests.** There is no CI enforcement of private terms, because CI runs contributor-controlled code and must not hold the denylist. Until the trusted workflow described in spec section 9 exists, pull requests from outside contributors must not be merged. This is a hard gate, not a preference.
-- **Do not restore the deleted repository** during the 90-day window.
 - **`CI=true` is not authentication.** The named skip stops an absent denylist from becoming an accidental green run; it cannot stop a deliberate local bypass.
+
+---
+
+## Residual exposure
+
+The rewrite is done with a force-push, so the pre-rewrite commits remain on
+GitHub as unreachable objects. They are not listed, not cloned, and not
+reachable from any ref, but they can be fetched by SHA through the API until
+GitHub garbage-collects them, which happens on no schedule you control.
+
+This is accepted deliberately. Retrieving one requires knowing a SHA that was
+never published anywhere, in a repository that is private, has one contributor,
+and has no forks or pull requests.
+
+**It stops being accepted the moment this repository is made public**, since the
+objects then sit inside a public repository. If that is the plan, do not flip
+this repository's visibility. Push the rewritten history to a **new** public
+repository instead and leave this one private. The new repository is built from
+the rewritten commits only, so it never contains the old objects at all, and no
+deletion is needed anywhere. That path costs one `gh repo create` and needs no
+extra token scope.
