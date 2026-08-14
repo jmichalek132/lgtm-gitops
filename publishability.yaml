@@ -8,9 +8,10 @@
 # docs/superpowers/specs/2026-08-14-publishable-example-design.md.
 #
 # Patterns are written so they do not match their own configuration line. That
-# is why the leading slash is bracketed: the naive form '/Users/[^/ ]+/' DOES
-# match the line it is written on, which is what made an earlier design exempt
-# this file from its own scan. There is no exemption now.
+# is why the leading slash is bracketed: a naive pattern with a bare leading
+# slash before "Users" or "home" would match the very line that defines it,
+# which is what made an earlier design exempt this file from its own scan.
+# There is no exemption now.
 version: 1
 patterns:
   - id: macos-home-path

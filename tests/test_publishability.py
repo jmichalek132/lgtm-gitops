@@ -19,16 +19,18 @@ def test_shipped_config_loads():
     assert [p["id"] for p in patterns] == ["macos-home-path", "linux-home-path"]
 
 
-def test_shipped_patterns_do_not_match_their_own_config_line():
-    """The whole no-self-exemption design rests on this property."""
+def test_shipped_patterns_do_not_match_any_line_of_their_own_config():
+    """The whole no-self-exemption design rests on this property: Gate 1 will
+    scan this file like any other tracked file, so no pattern may match any
+    line of it, not just the line that defines the pattern."""
     text = (REPO_ROOT / "publishability.yaml").read_text(encoding="utf-8")
     for pattern in load_publishability_config(REPO_ROOT):
         rx = re.compile(pattern["regex"])
-        for line in text.splitlines():
-            if pattern["regex"] in line:
-                assert not rx.search(line), (
-                    f"pattern {pattern['id']} matches its own configuration line"
-                )
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            assert not rx.search(line), (
+                f"pattern {pattern['id']} matches its own configuration file "
+                f"at line {lineno}: {line!r}"
+            )
 
 
 def test_shipped_patterns_still_catch_a_real_path():
@@ -70,6 +72,15 @@ def test_missing_config_fails(tmp_path):
         ),
         ("version: 1\nversion: 1\npatterns: [{id: a, regex: x, message: y}]\n", "duplicate"),
         ("version: 1\npatterns: [{id: a, regex: x, message: y}]\nunknown: 1\n", "exactly"),
+        ("version: 1\npatterns: {}\n", "non-empty"),
+        ("version: 1\npatterns: [1]\n", "exactly"),
+        ("version: 1\npatterns: [{id: 1, regex: x, message: y}]\n", "id"),
+        ("version: 1\npatterns: [{id: a, regex: 1, message: y}]\n", "regex"),
+        ("version: 1\npatterns: [{id: a, regex: x, message: 1}]\n", "message"),
+        (
+            "version: 1\npatterns:\n  - id: a\n    id: b\n    regex: x\n    message: y\n",
+            "duplicate",
+        ),
     ],
 )
 def test_malformed_config_fails(tmp_path, body, expected):
@@ -84,4 +95,40 @@ def test_overlong_regex_fails(tmp_path):
         "version: 1\npatterns: [{id: a, regex: '%s', message: y}]\n" % ("a" * 513),
     )
     with pytest.raises(PublishabilityConfigError, match="512"):
+        load_publishability_config(root)
+
+
+def test_overlong_message_fails(tmp_path):
+    root = write_config(
+        tmp_path,
+        "version: 1\npatterns: [{id: a, regex: x, message: '%s'}]\n" % ("m" * 201),
+    )
+    with pytest.raises(PublishabilityConfigError, match="200"):
+        load_publishability_config(root)
+
+
+def test_invalid_utf8_fails(tmp_path):
+    (tmp_path / "publishability.yaml").write_bytes(
+        b"version: 1\npatterns: [{id: a, regex: x, message: '\xff\xfe'}]\n"
+    )
+    with pytest.raises(PublishabilityConfigError, match="UTF-8"):
+        load_publishability_config(tmp_path)
+
+
+def test_invalid_yaml_syntax_fails(tmp_path):
+    root = write_config(tmp_path, "version: 1\npatterns: [{id: a, regex: x, message: y}\n")
+    with pytest.raises(PublishabilityConfigError, match="valid YAML"):
+        load_publishability_config(root)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "",
+        "version: 1\npatterns: [{id: a, regex: x, message: y}]\n---\nfoo: bar\n",
+    ],
+)
+def test_wrong_document_count_fails(tmp_path, body):
+    root = write_config(tmp_path, body)
+    with pytest.raises(PublishabilityConfigError, match="one YAML document"):
         load_publishability_config(root)
