@@ -404,6 +404,26 @@ REPO_MARKER = "<repository>"
 REDACTED_PATH = "<redacted-path>"
 
 
+class DiscoveryFinding(str):
+    """An already-formatted discovery finding yielded by iter_scannable_files.
+
+    A str subclass, so every caller keeps treating it as text, but a DISTINCT
+    TYPE so a caller can tell it from file content without inspecting the
+    text. The previous discriminator, `text.startswith(f"{path}:")`, was
+    content-controlled: a file whose first bytes are its own
+    repository-relative path followed by a colon was classified as a
+    discovery finding, so neither gate ever scanned it and Gate 2 appended
+    its ENTIRE raw content as a finding, which is the one thing Gate 2 must
+    never print. It also let file content forge a discovery diagnostic,
+    including a fake `[privatescan] ok` line, and let a real file named
+    '<repository>' forge a total-discovery-failure report.
+
+    This is NOT the earlier `isinstance(x, str)` defect: that branch could
+    never fire, because content is a str too. DiscoveryFinding is a type no
+    content path ever constructs.
+    """
+
+
 def _escape_path(path: str) -> str:
     """Render a path safe to print. A filename can contain control
     characters, and an unescaped one can rewrite the diagnostic that reports
@@ -446,16 +466,19 @@ def _git_paths(root: Path, *args: str) -> list[str]:
 def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
     """Yield (path, text) for every file both gates should read.
 
-    `text` is either the file's decoded UTF-8 content, or an already
-    formatted finding string of the form "{path}: ..." that a caller appends
-    directly as-is: every discovery, filesystem or decoding problem becomes a
-    finding here, never a silent skip and never an uncaught exception. This
-    is the single discovery primitive shared by Gate 1
-    (scripts/rulecheck.py's check_publishability) and Gate 2
-    (scan_repository below); check_publishability tells a discovery finding
-    from real content with `text.startswith(f"{path}:")`, never isinstance
-    (both are always str), so every finding string produced here must start
-    with exactly that prefix.
+    `text` is either the file's decoded UTF-8 content, a plain `str`, or a
+    `DiscoveryFinding` (a `str` subclass): an already formatted finding of
+    the form "{path}: ..." that a caller appends directly as-is. Every
+    discovery, filesystem or decoding problem becomes a finding here, never
+    a silent skip and never an uncaught exception. This is the single
+    discovery primitive shared by Gate 1 (scripts/rulecheck.py's
+    check_publishability) and Gate 2 (scan_repository below); both tell a
+    discovery finding from real content with `isinstance(text,
+    DiscoveryFinding)`, a TYPE check, never a text-prefix check. File
+    CONTENT is attacker-controlled, so any discriminator based on the text
+    itself (the previous one compared `text.startswith(f"{path}:")`) can be
+    forged by a file whose own content happens to match it; a type no
+    content path ever constructs cannot be forged that way.
 
     Every discovered path is accounted for and none is read from twice
     under a false name: a duplicate report from discovery, and a path that
@@ -466,14 +489,16 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
         root_resolved = root.resolve()
     except OSError as exc:
         detail = _safe_error_detail(exc)
-        yield REPO_MARKER, f"{REPO_MARKER}: repository root could not be resolved ({detail})"
+        yield REPO_MARKER, DiscoveryFinding(
+            f"{REPO_MARKER}: repository root could not be resolved ({detail})"
+        )
         return
 
     try:
         paths = _git_paths(root, "--cached") + _git_paths(root, "--others", "--exclude-standard")
     except (subprocess.CalledProcessError, OSError) as exc:
         detail = _safe_error_detail(exc)
-        yield REPO_MARKER, (
+        yield REPO_MARKER, DiscoveryFinding(
             f"{REPO_MARKER}: file discovery failed, so nothing was scanned ({detail})"
         )
         return
@@ -481,7 +506,7 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
     seen: set[str] = set()
     for rel in sorted(paths):
         if rel in seen:
-            yield rel, f"{rel}: duplicate path returned by discovery"
+            yield rel, DiscoveryFinding(f"{rel}: duplicate path returned by discovery")
             continue
         seen.add(rel)
 
@@ -489,7 +514,9 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
         try:
             resolved = full.resolve()
         except OSError as exc:
-            yield rel, f"{rel}: path could not be resolved ({_safe_error_detail(exc)})"
+            yield rel, DiscoveryFinding(
+                f"{rel}: path could not be resolved ({_safe_error_detail(exc)})"
+            )
             continue
 
         # Checked before the escape test, not after: every symlink is
@@ -499,11 +526,11 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
         # inside a symlinked ANCESTOR directory still reaches the escape
         # check below, since is_symlink() here only inspects the leaf.
         if full.is_symlink():
-            yield rel, f"{rel}: symlink, which is not scannable and not allowed"
+            yield rel, DiscoveryFinding(f"{rel}: symlink, which is not scannable and not allowed")
             continue
 
         if resolved != root_resolved and root_resolved not in resolved.parents:
-            yield rel, f"{rel}: path escapes the repository root"
+            yield rel, DiscoveryFinding(f"{rel}: path escapes the repository root")
             continue
 
         # "discovered but missing" (git listed it, it is gone by read time)
@@ -511,26 +538,26 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
         # file: a gitlink, a FIFO, a device) are different problems and are
         # reported as two separate findings rather than folded into one.
         if not full.exists():
-            yield rel, f"{rel}: discovered but missing"
+            yield rel, DiscoveryFinding(f"{rel}: discovered but missing")
             continue
         if not full.is_file():
-            yield rel, f"{rel}: gitlink or non-regular file, which is not allowed"
+            yield rel, DiscoveryFinding(f"{rel}: gitlink or non-regular file, which is not allowed")
             continue
 
         try:
             data = full.read_bytes()
         except OSError as exc:
-            yield rel, f"{rel}: unreadable ({_safe_error_detail(exc)})"
+            yield rel, DiscoveryFinding(f"{rel}: unreadable ({_safe_error_detail(exc)})")
             continue
 
         if b"\x00" in data:
-            yield rel, f"{rel}: contains a NUL byte, so it is binary and is rejected"
+            yield rel, DiscoveryFinding(f"{rel}: contains a NUL byte, so it is binary and is rejected")
             continue
 
         try:
             yield rel, data.decode("utf-8")
         except UnicodeDecodeError:
-            yield rel, f"{rel}: not valid UTF-8"
+            yield rel, DiscoveryFinding(f"{rel}: not valid UTF-8")
 
 
 def scan_repository(root: Path, terms: list[dict]) -> list[str]:
@@ -564,7 +591,7 @@ def scan_repository(root: Path, terms: list[dict]) -> list[str]:
         path_hits = [(term_id, find_term(path, needle)) for term_id, needle in normalised]
         safe = REDACTED_PATH if any(hit is not None for _, hit in path_hits) else _escape_path(path)
 
-        if payload.startswith(f"{path}:"):
+        if isinstance(payload, DiscoveryFinding):
             findings.append(payload.replace(path, safe, 1))
             continue
 

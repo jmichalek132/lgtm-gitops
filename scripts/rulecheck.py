@@ -33,7 +33,7 @@ import yaml
 # root is already on sys.path some other way.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.privatescan import iter_scannable_files
+from scripts.privatescan import DiscoveryFinding, iter_scannable_files
 
 PUBLISHABILITY_FILE = "publishability.yaml"
 PUBLISHABILITY_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -226,14 +226,17 @@ def check_publishability(root: Path) -> list[str]:
         return [str(exc)]
     findings: list[str] = []
     for path, text in iter_scannable_files(root):
-        if text.startswith(f"{path}:"):
+        if isinstance(text, DiscoveryFinding):
             # A discovery finding, already formatted by iter_scannable_files
-            # using the raw, unescaped path (that is what keeps the prefix
-            # check above working). Escape it here, before the finding is
-            # ever returned, for the same reason scan_text_with_patterns
-            # already does for a content match: an unescaped control
-            # character in a filename could otherwise rewrite the
-            # diagnostic that reports it.
+            # using the raw, unescaped path. The discriminator is the TYPE,
+            # never a text prefix: file content controls `text`, so a
+            # content-based check (the previous one compared
+            # `text.startswith(f"{path}:")`) can be forged by a file whose
+            # own first bytes happen to match it. Escape the path here,
+            # before the finding is ever returned, for the same reason
+            # scan_text_with_patterns already does for a content match: an
+            # unescaped control character in a filename could otherwise
+            # rewrite the diagnostic that reports it.
             safe = escape_path(path)
             findings.append(text.replace(path, safe, 1))
         else:

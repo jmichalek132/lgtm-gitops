@@ -650,6 +650,24 @@ def test_findings_never_contain_the_term(tmp_path):
         assert "private-term-01" in finding
 
 
+def test_content_that_mimics_a_discovery_finding_is_still_scanned(tmp_path):
+    """A file whose first bytes are its own path and a colon must be scanned
+    as CONTENT, and its content must never be printed. Under the old
+    startswith() discriminator this file was classified as a discovery
+    finding: neither gate scanned it, and Gate 2 appended its entire raw
+    content, term included, as the finding."""
+    repo = _git_repo(tmp_path)
+    (repo / "c.md").write_text(
+        "c.md: symlink, which is not scannable and not allowed\nzephyrgate\n",
+        encoding="utf-8",
+    )
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": "zephyrgate"}])
+    assert findings
+    for finding in findings:
+        assert "zephyrgate" not in finding
+    assert any("private-term-01" in f for f in findings)
+
+
 # Beyond the plan's Step-1 tests: four gaps an earlier review found in the
 # Task 4 stand-in, which this task's implementation must close.
 

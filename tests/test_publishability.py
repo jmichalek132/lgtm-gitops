@@ -249,6 +249,35 @@ def test_symlink_is_never_silently_skipped(tmp_path):
     assert any("link.txt" in f and "symlink" in f for f in check_publishability(tmp_path))
 
 
+def test_content_that_mimics_a_discovery_finding_is_still_pattern_scanned(tmp_path):
+    """A file whose content begins with its own path and a colon must still
+    be scanned by Gate 1's pattern matcher, not mistaken for an
+    already-formatted discovery finding. Under the old
+    `text.startswith(f"{path}:")` discriminator this file was classified as
+    discovery output and skipped entirely, so a real personal path sitting
+    on its second line was never checked against publishability.yaml."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    write_config(
+        tmp_path,
+        "version: 1\n"
+        "patterns:\n"
+        "  - id: macos-home-path\n"
+        "    regex: '[/]Users[/][^/ \\t\\r\\n]+[/]'\n"
+        "    message: \"personal absolute path\"\n",
+    )
+    (tmp_path / "c.md").write_text(
+        "c.md: symlink, which is not scannable and not allowed\n"
+        "/" + "Users/alice/notes/\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+
+    findings = check_publishability(tmp_path)
+    assert any("personal absolute path" in f for f in findings)
+
+
 def test_discovery_failure_is_a_finding_not_an_empty_pass(tmp_path):
     write_config(tmp_path, "version: 1\npatterns: [{id: a, regex: x, message: y}]\n")
     findings = check_publishability(tmp_path)  # not a git repo: ls-files fails
