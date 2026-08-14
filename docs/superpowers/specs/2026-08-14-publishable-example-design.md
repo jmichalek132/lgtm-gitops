@@ -158,7 +158,10 @@ terms:
 
 The resolved denylist path must be a readable regular file, must not be a
 symlink, and must not be equal to or contained by the resolved repository root.
-Violation is a failure before discovery starts.
+Violation is a failure before discovery starts. To make "not a symlink" survive
+a validation-then-read race, the check uses `lstat`, opens with `O_NOFOLLOW`
+where available, and re-checks with `fstat` on the resulting descriptor rather
+than trusting the pre-open stat.
 
 The denylist is UTF-8 and contains exactly one YAML document. Its root has
 exactly `version` and `terms`; `version` is exactly the integer `1`; `terms` is
@@ -172,9 +175,15 @@ id appears in findings and in any report, and a descriptive id re-creates the
 semantic crib that made a digest weak.
 
 Values, matched text and parser source snippets are never printed. Diagnostics
-for the denylist contain only its path, a generic error category, a source line
-number when safely available, and opaque ids. A parser exception that embeds a
-source line is not forwarded verbatim.
+produced **before** a valid denylist has loaded never print the
+environment-supplied path; they use `<denylist-path>`, a generic error category,
+and a source line number only when it can be obtained without forwarding parser
+text. After the denylist has loaded, opaque ids may be printed. A parser
+exception that embeds a source line or path is not forwarded verbatim.
+
+This ordering matters: until the denylist parses, the scanner cannot check the
+supplied path against the terms, so a path that itself contains a term would be
+echoed by the very error meant to report the problem.
 
 The scanner entry point exits zero only after a complete clean scan. An unset
 variable, unavailable or in-repository denylist, schema error, discovery error
@@ -184,40 +193,101 @@ not run but reports that it found nothing.
 #### Matching
 
 Every regular file's UTF-8 contents **and every discovered repository-relative
-path** are candidates. Candidate text and denylist values first undergo Unicode
-NFKC followed by `casefold()`. Matching is literal substring matching, never
-token matching: tokenising on `[a-z0-9]+` was specified in an earlier revision
-and rejected on measurement, because it misses a term embedded in a longer
-identifier, which is exactly how one reappears in code.
+path** are raw candidates. Repository-relative path bytes that are not valid
+UTF-8 produce a generic finding and are never printed raw. Matching is literal
+substring matching, never token matching: tokenising on `[a-z0-9]+` was
+specified in an earlier revision and rejected on measurement, because it misses
+a term embedded in a longer identifier.
 
-The scanner then applies the transformations below. The three deletion
-transformations form a closure: every combination is applied to both candidate
-text and the term. Outputs from the percent, escape and Base64 decoders undergo
-normalisation and the same deletion closure, but no decoder is applied
-recursively.
+Define `N(s)` as Unicode NFKC applied to `s`, followed by `casefold()`. Define
+three deletion operators over an already-normalised string:
 
-| Transformation | Exact rule |
-| --- | --- |
-| source | scan the normalised text unchanged |
-| punctuation, separators, format characters | remove characters whose Unicode general category starts with `P` or `Z`, plus category `Cf` |
-| line breaks | remove CRLF as one break, and remove CR, LF, NEL, U+2028, U+2029 individually |
-| inserted digits | remove ASCII digits after NFKC, comparing this view only with terms whose normalised form contains no ASCII digit |
-| percent decoding | replace each maximal sequence of `%HH` octets once; invalid triplets remain literal and cannot suppress decoding of another sequence |
-| JSON/YAML escapes | decode one syntactically valid layer of `\uXXXX`, valid UTF-16 surrogate pairs, `\UXXXXXXXX` and `\xXX`; invalid escapes remain literal and cannot suppress another escape |
-| Base64 | decode maximal standard and URL-safe Base64 tokens of at least eight characters, with valid explicit padding or the minimum inferred padding; each candidate considered independently |
+- `P` removes every character whose Unicode general category starts with `P` or
+  `Z`, plus category `Cf`
+- `L` removes CRLF as one break, and removes CR, LF, NEL, U+2028 and U+2029
+  individually
+- `D` removes ASCII digits
 
-Percent and Base64 byte results are decoded as UTF-8 with replacement for
-isolated invalid bytes, so invalid bytes do not suppress valid neighbouring
-text. Invalid encoding candidates are not scanner errors, because arbitrary
-source text can resemble an encoding; they remain covered by the unchanged
-source view.
+For each term independently, the eligible deletion masks are every subset of
+`{P, L}`, plus every subset containing `D` only when `N(term)` contains no ASCII
+digit. Each operator in a mask is applied exactly once, in `P`, `L`, `D` order.
+Candidate and term are compared **using the same mask**:
+`apply(mask, candidate)` contains `apply(mask, N(term))`. Identical resulting
+views may be deduplicated. If any eligible transformed term is empty, the
+denylist is invalid and scanning fails before discovery, because an empty term
+matches every string.
 
-A raw-source content match reports `path:line: <opaque-id>`. A transformed
-content match reports `path: <opaque-id>` without inventing a line. **Before any
-path is printed it is checked against every term and view; if the path itself
-matches, the entire path is replaced by `<redacted-path>` in every finding.**
-Non-matching paths are escaped before printing so control characters cannot
-alter logs.
+Mask alignment is load-bearing. A term `ab` against candidate `a-1b` matches
+under neither punctuation-deletion nor digit-deletion alone, only under their
+combination; and a term containing a meaningful digit must exclude every
+digit-bearing mask, or the digit is erased and every mask produces false
+positives.
+
+The candidate base views are constructed as follows:
+
+- **Source view:** apply `N` directly to the raw candidate.
+- **Percent view:** on the raw candidate, replace every maximal adjacent run of
+  `%HH` octets once. Decode resulting bytes as UTF-8 with replacement for
+  isolated invalid bytes. An invalid triplet remains literal, scanning resumes
+  at the following character, and it cannot suppress a later valid run.
+- **Escape view:** scan the raw candidate left to right and decode one
+  non-recursive layer of `\uXXXX`, a valid adjacent UTF-16 surrogate pair,
+  `\UXXXXXXXX`, or `\xXX`. A backslash starts an escape only when preceded by an
+  even-length run of consecutive backslashes. `\U` values above U+10FFFF,
+  surrogate scalar values, lone surrogates and incomplete or non-hex escapes
+  remain literal. After an invalid escape, scanning advances by one character so
+  it cannot suppress a later valid escape.
+- **Base64 views:** inspect the raw candidate **without normalising or
+  case-folding it**. Standard and URL-safe alphabets are considered separately
+  and remain case-sensitive. For each maximal alphabet run, consider every
+  distinct candidate obtained by removing zero to three characters from each
+  end, provided at least two alphabet characters remain. Accept candidates with
+  valid terminal padding, or with no explicit padding when adding the minimum
+  zero, one or two padding characters produces a valid length. Invalid maximal
+  runs therefore cannot suppress a valid contained candidate. Decode each valid
+  candidate independently, decode its bytes as UTF-8 with replacement, and
+  construct a view in which that candidate is replaced by the decoded text.
+
+Apply `N` to every decoder result, then apply the same eligible deletion masks
+to the decoder result and the plaintext term. Decoders are applied only to raw
+candidates, never to denylist terms and never to another decoder's output.
+Invalid encoding candidates are not scanner errors, but they do not suppress
+another valid candidate.
+
+**Base64 is why normalisation cannot come first.** An earlier revision
+normalised and case-folded before decoding. Base64 is case-sensitive, so that
+destroys the payload: `RXhhbXBsZVg=` case-folded decodes to different bytes, a
+deterministic false negative in the gate's central mechanism, confirmed by
+execution. The `\U` and `\u` escapes are likewise distinct.
+
+**Measured false-positive cost.** Deleting separators concatenates the whole
+candidate, so a term can match across an original word boundary: over this
+repository's 292k-character corpus, the deletion views expose 105,288 nine-grams
+that do not exist in the source view, against 103,858 that do, roughly doubling
+the surface a term can collide with. `we over***REMOVED*** sections` matches a
+nine-character term under `{P}` and not in source. This is accepted
+deliberately: a false positive blocks and is triaged, whereas a false negative
+publishes. Anchoring deletion-view matches to an original word start was
+measured to remove both observed false positives while preserving every evasion
+catch, and was rejected because it also creates a false negative for a term
+embedded mid-word and separator-split. The consequence for triage is real and
+is why findings must carry the mask that produced them.
+
+A raw-source content match reports `path:line: <opaque-id>`, plus the deletion
+mask that produced it. A transformed content match reports `path: <opaque-id>`
+without inventing a line. After a valid denylist has loaded, every repository
+path is checked with the complete matching algorithm before it is printed; if
+the path matches, the entire path is replaced by `<redacted-path>` in every
+finding. Non-matching paths are escaped before printing so control characters
+cannot alter logs.
+
+**This redaction prevents direct emission of matching path characters. It does
+not prevent inference** from the existence, count, order or grouping of findings
+when the candidate tree is otherwise known: in a two-file tree, one named
+finding and one `<redacted-path>` finding identify the second file by
+elimination. All Gate 2 output and every freeze artifact are therefore
+confidential. They stay outside the repository and are never attached to public
+CI, issues, pull requests or other public reports.
 
 Arbitrary encryption, compression and recursive decoding remain outside the
 automated guarantee, and section 9 says so.
@@ -277,22 +347,33 @@ careful human cannot read that as clean, but Make, GitHub Actions, pre-push
 hooks and every other consumer of an exit status do.
 
 The only skip is the exact value `PUBLISHABILITY_PRIVATE_SCAN=skip-untrusted-ci`,
-accepted only when `CI=true`. The untrusted workflow sets it explicitly and ends
-with `CHECKS INCOMPLETE`. That job may exit zero, because section 9 forbids
-treating it as private-term enforcement, but its job name, README documentation
-and branch-protection context call it `public-checks`, not a complete
-publishability check. Any other skip value fails.
+accepted when `CI=true`. **`CI=true` is an ordinary, locally settable
+environment value, not authentication.** This condition prevents an absent
+denylist from accidentally becoming a successful local scan; it cannot prevent a
+user from intentionally selecting CI mode.
 
-This keeps Gate 2 inside `make check`, so the normal local command cannot forget
-it, while making the untrusted-CI exception explicit rather than letting an
-absent secret silently turn a required local security check into exit zero.
+The untrusted workflow sets the skip explicitly and ends with `CHECKS
+INCOMPLETE`. That job may exit zero because section 9 forbids treating it as
+private-term enforcement. Its job name, README documentation and
+branch-protection context call it `public-checks`, not a complete publishability
+check. Any other skip value fails.
+
+When this deliberate skip is active, `scripts/check.sh` records a caveat stating
+that only public checks ran. The implementation must replace that script's
+current unconditional final sentence `CI must never end here.` with wording that
+does not contradict a deliberate CI result. Gate 2 remains in the default local
+`make check` path, which protects against accidental omission but not
+intentional bypass.
 
 ### Registration and ownership
 
 Gate 1 registers as `publishability` in the existing `CHECKS` dict in
 `scripts/rulecheck.py`, taking `root` and returning findings like its
 neighbours. Every discovery, configuration and decoding error becomes a
-finding, never an empty result and never an uncaught traceback.
+finding, never an empty result and never an uncaught traceback. Gate 1 escapes
+repository paths before printing them, for the same reason Gate 2 does: a
+filename containing control characters can otherwise rewrite its own
+diagnostic.
 
 `/publishability.yaml` is added to `.github/CODEOWNERS` **and** to
 `PLATFORM_OWNED_PATHS` in `scripts/rulecheck.py`. Without the second, a team
@@ -335,13 +416,19 @@ defects impossible, and this document does not claim it does.
 ## 5. Document rewrite
 
 Affected references become neutral descriptions such as "the prior system"
-throughout the prior design and plan. The local archive path cited there, which
-Gate 1 would flag independently, goes with them. This spec is itself in scope:
-nothing is exempt for being documentation, a plan or scanner test material.
+throughout the prior design and plan. The local archive path cited there goes
+with them. Note that Gate 1 does **not** catch that path: it is written
+tilde-relative, and the configured patterns matched zero of the currently
+discovered paths when executed. Removing it is a document-rewrite obligation,
+not something the gate will do for you. This spec is itself in scope: nothing is
+exempt for being documentation, a plan or scanner test material.
 
-Appendix A of the prior design keeps **every** evidence row. Its repository
-inventory table, file counts and commit counts are deleted: they identify, and
-they teach nothing the failure mode does not.
+Appendix A of the prior design keeps **every** evidence row. The standalone
+repository inventory table, and any count whose sole purpose is to inventory
+private-term exposure, are deleted. Quantitative evidence **inside** an
+Appendix A row remains when it is part of the concrete mechanism or records a
+correction to a previously wrong claim; the row-preservation criteria below
+govern those cases.
 
 "Do not generalise too far" is not a testable instruction, so acceptance is
 mechanical:
@@ -364,15 +451,42 @@ A runbook with a human go/no-go, executed once, attended.
 
 ### Freeze report
 
-Generated **after all content changes are frozen**, written outside the
-repository, recording by opaque term id:
+The freeze scan runs **after all content changes are frozen**, in the isolated
+mirror-like clone used for cutover. It reuses Gate 2's exact normalisation,
+decoder and deletion-closure algorithm for every textual surface.
 
-- matches in the tracked and non-ignored untracked working tree
-- matches in every reachable blob and path under every fetched ref
-- commit and annotated-tag messages
-- ref names, and author, committer and tagger identities
-- `.gitmodules`, gitlinks and Git LFS objects
-- the exact freeze commit and the complete remote-ref inventory
+Before scanning, the runbook obtains the complete advertised ref-name and
+object-id inventory with `git ls-remote --refs`, fetches every advertised ref
+into an isolated local ref namespace, and verifies every advertised name-object
+pair is present locally. A ref that cannot be fetched, a missing object, or a
+changed remote inventory is a no-go.
+
+The scanner then:
+
+- scans the frozen tracked and non-ignored untracked working tree
+- walks every commit, annotated tag and tree reachable from every fetched ref
+- scans every historical tree-entry path, and scans each reachable blob object
+  at least once
+- parses commit and annotated-tag objects and separately scans their messages,
+  and their author, committer and tagger identity fields
+- scans every ref name
+- treats `.gitmodules` as an ordinary blob, and scans every gitlink path, mode
+  and target object id
+- identifies every reachable Git LFS pointer, fetches all referenced LFS
+  objects, verifies each expected object is present, and scans each object
+
+A malformed object, missing LFS object, unreadable object, NUL-containing
+textual surface or non-UTF-8 textual surface is a **no-go**, never a skipped
+candidate. Every match is classified by opaque term id and surface type.
+
+The human-readable report is written outside the repository and follows the
+confidentiality and redaction rules in section 3. The exact machine-readable ref
+inventory used for equality checks is a private cutover artifact stored outside
+the repository alongside the denylist, never committed or published.
+
+The report records the exact freeze commit, the verified remote-ref inventory,
+every classified finding and every no-go condition. The same enumeration and
+matching procedure is rerun after each rewrite attempt.
 
 ### Rewrite
 
@@ -498,13 +612,29 @@ pattern matching content inside `publishability.yaml` itself; each configured id
 testable independently; a catastrophic-backtracking expression with adversarial
 input returns a finding within a fixed outer deadline rather than hanging.
 
-**Gate 2:** each transformation row with a concrete input, including every
-combination in the deletion closure; normalisation of case and Unicode; a term
-appearing only in a path name is found; a matching path is reported as
-`<redacted-path>`; findings carry the opaque id and never the term, matched text
-or parser snippet; missing env var, missing file, in-repository denylist,
-symlinked denylist, empty list, malformed schema and colliding terms each fail
-closed and non-zero.
+**Gate 2:** every eligible deletion mask with a concrete input, including the
+`ab` / `a-1b` case that matches only under a combined mask, and a digit-bearing
+term proving digit masks are excluded for it; a term deriving to empty is
+rejected as an invalid denylist rather than matching everything; normalisation
+of case and Unicode; a term appearing only in a path name is found; a matching
+path is reported as `<redacted-path>`; findings carry the opaque id and the
+producing mask, and never the term, matched text or parser snippet.
+
+Decoders specifically, since this is where the previous revision was provably
+wrong: a Base64-encoded occurrence whose alphabet run is case-mixed is found,
+proving decoding precedes case folding; a short encoding under eight characters
+is found; a valid candidate contained in an invalid maximal run is found;
+standard and URL-safe alphabets are covered separately; `\uXXXX`, a surrogate
+pair, `\UXXXXXXXX` and `\xXX` each decode, while an escape preceded by an
+odd-length backslash run does not; an invalid percent triplet or escape does not
+suppress a later valid one; and a decoder is never applied to a denylist term or
+to another decoder's output.
+
+Failure modes: missing env var, missing file, in-repository denylist, symlinked
+denylist (including one swapped between validation and read), empty list,
+malformed schema and colliding terms each fail closed and non-zero. Diagnostics
+raised before the denylist loads print `<denylist-path>` and never the supplied
+path.
 
 **Discovery:** `git ls-files` non-zero exit is a finding, not an empty scan;
 NUL byte, symlink, gitlink, unreadable file, non-UTF-8 file and path-escape each
@@ -531,13 +661,16 @@ design decision that reveals something by its shape rather than its wording, or
 a term hidden under encryption, compression or recursive encoding.
 
 **There is no CI enforcement of private terms**, by design: CI runs
-pull-request-controlled code and must not hold the secret. The private gate runs
-locally, before push, and fails non-zero when it cannot run. Closing this needs a
-trusted workflow that takes its own implementation from the protected base
-branch, fetches candidate blobs through the API, treats them strictly as data,
-never checks out or executes the PR head, and fails when its secret is absent.
-That is deferred, and it is a **hard gate, not a preference**: until it exists,
-this repository must not merge pull requests from outside contributors.
+pull-request-controlled code and must not hold the secret. Contributors are
+required to run the private gate locally before push. This design installs no
+pre-push hook, and an explicitly selected local CI skip can bypass the scan.
+Without that explicit skip, an absent or unusable denylist fails non-zero.
+Closing the enforcement gap needs a trusted workflow that takes its own
+implementation from the protected base branch, fetches candidate blobs through
+the API, treats them strictly as data, never checks out or executes the PR head,
+and fails when its secret is absent. That is deferred, and it is a **hard gate,
+not a preference**: until it exists, this repository must not merge pull
+requests from outside contributors.
 
 Even with it, CI cannot prevent *initial* disclosure in a public pull request or
 fork, because those git objects exist before CI starts. Nothing in this design
@@ -546,7 +679,11 @@ changes that.
 And the cutover reduces exposure rather than erasing it: deleted repositories
 remain restorable for 90 days.
 
-The honest claim is: the repository contains no configured private term, its
-history contains none, reintroducing one fails locally before push, and the
-default branch is protected. That is materially narrower than "this repository
-is safe to publish", and the README should not make the second claim.
+The honest claim is: at cutover, the repository and rewritten history contain no
+configured private term, a correctly configured local scan rejects
+reintroduction unless the user explicitly selects the untrusted-CI skip, and the
+default branch is protected. Until trusted private-term CI exists there is no
+automated enforcement against an intentional local skip, nor against a
+maintainer merging content that was never privately scanned. That is materially
+narrower than "this repository is safe to publish", and the README should not
+make the second claim.
