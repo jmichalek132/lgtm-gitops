@@ -194,7 +194,11 @@ not run but reports that it found nothing.
 
 Every regular file's UTF-8 contents **and every discovered repository-relative
 path** are raw candidates. Repository-relative path bytes that are not valid
-UTF-8 produce a generic finding and are never printed raw. Matching is literal
+UTF-8 are decoded with `surrogateescape`, scanned like any other path, and
+escaped before printing. An earlier revision required them to produce a generic
+finding instead and never be printed; that was weaker, because it declined to
+scan a path rather than scanning it, and escaping already makes printing safe.
+Matching is literal
 substring matching, never token matching: tokenising on `[a-z0-9]+` was
 specified in an earlier revision and rejected on measurement, because it misses
 a term embedded in a longer identifier.
