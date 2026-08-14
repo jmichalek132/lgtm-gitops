@@ -623,6 +623,16 @@ def test_ignored_file_is_not_scanned(tmp_path):
     assert not any("secret.txt" in f for f in findings)
 
 
+def test_zero_discovered_files_is_a_finding_not_a_clean_scan(tmp_path):
+    """Discovery that succeeds and returns nothing is a scan of zero files
+    reported as clean, the exact failure both gates exist to prevent. An
+    initialised repository with no tracked and no untracked files must
+    still produce a finding, not an empty (and therefore passing) result."""
+    repo = _git_repo(tmp_path)  # initialised, no tracked and no untracked files
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": "zephyrgate"}])
+    assert findings and "no files at all" in findings[0]
+
+
 def test_term_in_a_path_name_is_found(tmp_path):
     repo = _git_repo(tmp_path)
     (repo / "zephyrgate-notes.txt").write_text("clean", encoding="utf-8")

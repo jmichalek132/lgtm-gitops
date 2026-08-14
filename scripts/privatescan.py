@@ -559,6 +559,17 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
         except UnicodeDecodeError:
             yield rel, DiscoveryFinding(f"{rel}: not valid UTF-8")
 
+    # Discovery that succeeds and returns nothing is a scan of zero files
+    # reported as clean, which is the failure both gates exist to prevent.
+    # `seen` holds every path this generator accepted; empty means git
+    # answered, answered with nothing, and both gates were about to pass on
+    # an unexamined tree. Reached by a wrong root, an emptied index, or a
+    # `.gitignore` that excludes everything untracked.
+    if not seen:
+        yield REPO_MARKER, DiscoveryFinding(
+            f"{REPO_MARKER}: discovery returned no files at all, so nothing was scanned"
+        )
+
 
 def scan_repository(root: Path, terms: list[dict]) -> list[str]:
     """Scan every discovered file's content, and every discovered path, for
