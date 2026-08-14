@@ -139,12 +139,103 @@ def test_empty_deriving_term_raises_even_when_an_earlier_mask_would_match():
         find_term("yaml doc:\n--- \nfoo: bar", normalise("---"))
 
 
-def test_candidate_views_yields_only_source_percent_and_base64():
-    """Escape-view decoding (\\uXXXX, surrogate pairs, \\UXXXXXXXX, \\xXX) is
-    Task 7, not this task. This module must not yield an 'escape' view yet."""
+def test_candidate_views_yields_only_source_percent_escape_and_base64():
+    """Scope boundary for the view generator: these five view kinds, and
+    nothing else, are ever produced. source, percent and escape are
+    unconditional; the two base64 views are not (they depend on the input
+    containing a decodable run)."""
     names = {name for name, _ in candidate_views("plain text")}
-    assert names <= {"source", "percent", "base64-standard", "base64-urlsafe"}
-    assert "escape" not in names
+    assert {"source", "percent", "escape"} <= names
+    assert names <= {"source", "percent", "escape", "base64-standard", "base64-urlsafe"}
+
+
+# Task 7: the escape view. Decodes one non-recursive layer of \uXXXX, \xXX,
+# \UXXXXXXXX and an adjacent UTF-16 surrogate pair. Backslash parity decides
+# whether an escape begins at all (an even-length run of backslashes is all
+# literal; an odd-length run's last backslash may start one); an invalid
+# escape must advance scanning by exactly one character so it cannot mask a
+# later valid one.
+#
+# Several of these deliberately call privatescan._escape_view directly
+# rather than going through find_term. For the "stays literal" claims,
+# find_term's None is not precise enough on its own: a bug that quietly
+# turns an invalid escape into some *other* single character (instead of
+# leaving the source text untouched) would also produce None, since that
+# wrong character still would not spell part of "zephyrgate". Only checking
+# _escape_view's exact output proves nothing was decoded.
+
+
+def test_json_unicode_escape_is_decoded():
+    escaped = '"zephyr' + chr(92) + 'u0067ate"'
+    assert find_term(escaped, normalise(TERM)) is not None
+
+
+def test_hex_escape_is_decoded():
+    assert find_term(r'"zephyr\x67ate"', normalise(TERM)) is not None
+
+
+def test_long_unicode_escape_is_decoded():
+    assert find_term(r'"zephyr\U00000067ate"', normalise(TERM)) is not None
+
+
+def test_surrogate_pair_is_decoded():
+    """A valid adjacent UTF-16 surrogate pair combines into U+1F600. This one
+    is checked on _escape_view directly rather than through find_term: the P
+    mask deletes Symbol-category characters as punctuation, and an emoji is
+    category So, so a needle built around one can match straight through the
+    mask without any decoding happening at all (confirmed empirically: an
+    earlier version of this test using find_term passed before _escape_view
+    even existed, because the P-masked needle degraded to its plain ASCII
+    suffix, which was already sitting in the raw hex digits). That is a real
+    property of the masking design, not a bug, but it makes an emoji-bearing
+    needle useless as find_term bait for this specific behaviour."""
+    combined = privatescan._escape_view(chr(92) + "ud83d" + chr(92) + "ude00")
+    assert combined == "\U0001F600"
+
+
+def test_unpaired_high_surrogate_stays_literal():
+    """The same high surrogate as above with no low surrogate adjacent:
+    pairing must not happen speculatively off half a pair."""
+    literal = chr(92) + "ud83d"
+    assert privatescan._escape_view(literal) == literal
+
+
+def test_escape_after_odd_backslash_run_is_literal():
+    r"""In \\u0067 the backslash is itself escaped, so no escape begins. A
+    scan that looks for a bare \u pattern without tracking backslash parity
+    would find an "escape" starting at the second backslash and wrongly
+    decode 'g'."""
+    assert find_term(r'"zephyr\\u0067ate"', normalise(TERM)) is None
+
+
+def test_invalid_escape_advances_by_exactly_one_character():
+    r"""A width-sized skip on failure, instead of a single-character one,
+    would swallow the backslash that starts the very next escape. \uZ is an
+    invalid \u escape (its 4-digit window runs into the following
+    backslash), and its own literal filler ('u', 'Z') is shorter than \u's
+    4-digit width, so the two behaviors diverge: single-character
+    advancement lands exactly on the next backslash and decodes the
+    following g to 'g'; a width-sized jump overshoots into that
+    escape's own digits and never recognises it as a fresh escape start."""
+    probe = chr(92) + "uZ" + chr(92) + "u0067"
+    expected = chr(92) + "uZg"
+    assert privatescan._escape_view(probe) == expected
+
+
+def test_out_of_range_long_escape_stays_literal():
+    assert find_term(r'"zephyr\U0011FFFFate"', normalise(TERM)) is None
+
+
+def test_lone_low_surrogate_stays_literal():
+    """DC00-DFFF is a low surrogate: valid hex, in chr()'s range, but not a
+    Unicode scalar value on its own."""
+    assert privatescan._escape_view(r"\udc00") == r"\udc00"
+
+
+def test_long_escape_landing_in_surrogate_range_stays_literal():
+    r"""\U can spell a surrogate value (D800-DFFF) directly in its 8 hex
+    digits; it must stay literal exactly like a lone \u surrogate does."""
+    assert privatescan._escape_view(r"\U0000D800") == r"\U0000D800"
 
 
 # Regression tests for false negatives found in fix round 1. Each of these

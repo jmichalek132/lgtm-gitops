@@ -119,9 +119,86 @@ def _base64_views(raw: str) -> Iterator[tuple[str, str]]:
                     yield name, decoded
 
 
+_ESCAPE_WIDTHS = {"u": 4, "x": 2, "U": 8}
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def _escape_view(raw: str) -> str:
+    r"""Decode exactly one non-recursive layer of \uXXXX, an adjacent UTF-16
+    surrogate pair, \UXXXXXXXX or \xXX.
+
+    A backslash starts an escape only when it is the last of an odd-length
+    run of consecutive backslashes: each preceding pair is an already
+    escaped backslash and stays untouched, so \\u0062 (an even-length run)
+    is left as two literal backslashes followed by literal 'u0062' and
+    decodes nothing. After an invalid escape, scanning advances by exactly
+    one character, never by the escape's nominal width, so a corrupt escape
+    cannot consume, and thereby suppress, a later valid one.
+
+    Builds the result with a list plus one join, and never backtracks over
+    a character once consumed, so this is linear in len(raw) regardless of
+    how many escapes or backslash runs it contains.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        if raw[i] != "\\":
+            out.append(raw[i])
+            i += 1
+            continue
+        j = i
+        while j < n and raw[j] == "\\":
+            j += 1
+        run = j - i
+        if run % 2 == 0:
+            out.append(raw[i:j])
+            i = j
+            continue
+        out.append(raw[i:j - 1])  # the escaped-backslash pairs, unchanged
+        i = j - 1  # the last, operative backslash of the run
+        kind = raw[i + 1] if i + 1 < n else ""
+        width = _ESCAPE_WIDTHS.get(kind)
+        if width is None:
+            out.append(raw[i])
+            i += 1
+            continue
+        digits = raw[i + 2:i + 2 + width]
+        if len(digits) != width or any(c not in _HEX_DIGITS for c in digits):
+            out.append(raw[i])
+            i += 1
+            continue
+        value = int(digits, 16)
+        if kind == "u" and 0xD800 <= value <= 0xDBFF:
+            tail = raw[i + 6:i + 12]
+            low_digits = tail[2:]
+            if (
+                len(tail) == 6
+                and tail[:2] == "\\u"
+                and all(c in _HEX_DIGITS for c in low_digits)
+            ):
+                low = int(low_digits, 16)
+                if 0xDC00 <= low <= 0xDFFF:
+                    combined = 0x10000 + ((value - 0xD800) << 10) + (low - 0xDC00)
+                    out.append(chr(combined))
+                    i += 12
+                    continue
+            out.append(raw[i])
+            i += 1
+            continue
+        if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF:
+            out.append(raw[i])
+            i += 1
+            continue
+        out.append(chr(value))
+        i += 2 + width
+    return "".join(out)
+
+
 def candidate_views(raw: str) -> Iterator[tuple[str, str]]:
     yield "source", normalise(raw)
     yield "percent", normalise(_percent_view(raw))
+    yield "escape", normalise(_escape_view(raw))
     unwrapped = _WHITESPACE.sub("", raw)
     sources = (raw, unwrapped) if unwrapped != raw else (raw,)
     seen: set[str] = set()
