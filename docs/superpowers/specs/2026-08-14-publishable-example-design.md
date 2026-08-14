@@ -6,6 +6,13 @@ safe, without losing what makes its design arguments convincing.
 **Status:** design of record for workstream 2b. Workstream 2 (the repository
 foundation) is complete and pushed to a private remote.
 
+**Notation:** this document never writes a private term. `TERM-A` and `TERM-B`
+stand for the two words being removed. That is not squeamishness — an earlier
+revision of this spec discussed them by name, and the commit that fixed a bug
+in this very design reintroduced one of them into the git history it was
+written to clean. A document about removing a word is a place the word gets
+written.
+
 ---
 
 ## 1. Why this exists
@@ -14,33 +21,41 @@ The repository was built as a rebuild of a working system at a previous
 employer. That heritage is the reason nearly every rule in it exists, and it is
 also the reason the repository cannot be published as it stands.
 
-The exposure was measured, not estimated:
+Two words must go: `TERM-A` (a former employer's name) and `TERM-B` (a former
+internal codename). Both appear only under `docs/superpowers/`; the chart, the
+scripts, the rules and the tests contain nothing private. Everything else a
+reader might mistake for private detail is already placeholder material: `@org`
+in CODEOWNERS, `runbooks.internal` and `grafana.internal` in rule annotations,
+`platform` as the only team.
 
-| Where | Former employer name | Former internal codename |
+**No exposure counts appear in this document.** An earlier revision tabulated
+them, and every number was stale within the hour: the tree gained occurrences
+as this spec was written, the history gained a commit message, and a "39
+commits" figure became 41. Counts are produced by the freeze report (section 6)
+against the actual repository at the moment of the cutover, never copied into
+prose.
+
+So this is a small change whose risk is not size. It is that a one-time sweep
+looks identical to a thorough one right up until someone greps the published
+repository, and that the sweep's own paperwork is a place new occurrences
+appear.
+
+## 2. Structure
+
+One workstream, four separately reviewed units. They are **not** one
+implementation plan; the last one is not an implementation plan at all.
+
+| Unit | Deliverable | Order |
 | --- | --- | --- |
-| Tracked files at HEAD | 2 lines, both in the spec's Appendix A | 25 lines, all under `docs/superpowers/` |
-| Commit diffs | 1 commit | 4 commits |
-| Commit messages | 0 | 1 commit, twice |
+| Publishability gates | Public pattern check in `make check`; private term scanner with an out-of-repo denylist | First |
+| Second-team fixture | `rules/payments/`, `dashboards/payments/`, CODEOWNERS, integration assertions | Independent PR, any time before the freeze |
+| Document rewrite | Neutral prior-system framing across every affected tracked document | After the gates exist |
+| Destructive cutover | Freeze report, history rewrite, remote recreation, public cutover, branch protection | Last, behind an explicit go/no-go |
 
-Everything else a reader might mistake for private detail is already
-placeholder material: `@org` in CODEOWNERS, `runbooks.internal` and
-`grafana.internal` in rule annotations, `platform` as the only team. The chart,
-the scripts, the rules and the tests contain nothing private.
-
-So this is a small, bounded change. Its risk is not size; it is that a
-one-time sweep looks identical to a thorough one right up until someone greps
-the published repository.
-
-## 2. What is in scope
-
-Four units, in the order they must be built:
-
-| Unit | Deliverable |
-| --- | --- |
-| Publishability check | `publishability.yaml` plus a `publishability` check in `scripts/rulecheck.py` |
-| Document rewrite | Neutral prior-system framing in the spec and plan |
-| Second example team | `rules/payments/`, `dashboards/payments/`, CODEOWNERS entries |
-| History rewrite | All 39 commits redacted; remote deleted and recreated |
+The second-team fixture is ordinary work and does not belong in a
+confidentiality change. The cutover is a **runbook with a human checkpoint**,
+not a task a subagent executes unattended: it destroys history and deletes a
+remote.
 
 ### Not in scope
 
@@ -48,312 +63,381 @@ Four units, in the order they must be built:
 `lgtm-gitops`. Charts and repositories legitimately differ, and the
 `observability-rules/source-path` ConfigMap annotation is a contract the
 ArgoCD-side workstreams will key on. Only the README's `# observability-rules`
-title changes, so the front door matches the repository name.
+title changes.
 
-**Scanning commit messages in the publishability check.** History is made clean
-once, by rewrite (section 6), and thereafter protected by the branch protection
-in `docs/branch-protection.md`. A check that scans all of history on every run
-would be the wrong shape: slow, and duplicating a guarantee that force-push
-protection already provides. The check governs tracked file contents.
+**A trusted CI workflow for private terms.** Deferred, with a gate rather than
+silence — see section 3's "What runs where" and section 9.
 
-**Branch protection itself.** Verified unavailable: both
-`POST /repos/{owner}/{repo}/rulesets` and
-`PUT /repos/{owner}/{repo}/branches/main/protection` return HTTP 403,
-`"Upgrade to GitHub Pro or make this repository public to enable this
-feature."` Publishing the repository is what makes protection available on this
-account, which makes this workstream a prerequisite for the one gap both prior
-reviews flagged. `docs/branch-protection.md` gains a note recording this.
+## 3. Publishability gates
 
-## 3. The publishability check
+### Security boundary
 
-### The problem with the obvious design
+The public repository must contain no private term **and no deterministic
+verifier derived from one**. An unsalted hash is not a redaction: it is an
+offline confirmation oracle over a small candidate set. Measured on this
+machine, a pure-Python single core tests 2.87M SHA-256 candidates per second,
+so a ten-million-entry wordlist of English words and brand names falls in about
+three seconds. An independent reviewer measured 3.29M/s and 3.04s. A public
+salt does not help against targeted guessing, and a stored length plus a hint
+reading "former employer name" makes candidate generation easier still.
 
-A denylist file that spells out the words it forbids **is** the leak it exists
-to prevent. Publish `publishability.yaml` containing `***REMOVED***` and the name is
-published, by the very mechanism meant to stop it.
+A keyed HMAC would be cryptographically sound, but the key cannot be given to
+`make check`, because `make check` runs pull-request-controlled code and could
+exfiltrate it.
 
-Storing the terms outside the repository fails differently and worse: the check
-would silently pass wherever the file is absent, which is precisely the
-appears-to-pass-but-never-ran failure this repository was built to eliminate.
+The conclusion is structural, and it is what an earlier revision of this design
+got wrong: **nothing derived from a private term is committed.** Not the term,
+not a digest, not a length, not a semantic hint. There are therefore two gates
+with different trust properties.
 
-### Design
+### Gate 1 — public pattern check
 
-Terms are stored as SHA-256 of the lowercased term, with the term's length,
-which the scan needs to size its search window. Findings report a
-non-identifying `hint`, never the term.
+Readable, non-secret patterns, committed and run by `make check` like every
+other check.
 
 ```yaml
 # publishability.yaml
-terms:
-  - hash: "sha256:<64 lowercase hex>"
-    length: 9
-    hint: "former employer name"
+version: 1
 patterns:
-  - regex: '/Users/[^/ ]+/'
-    hint: "personal absolute path"
+  - id: macos-home-path
+    regex: '[/]Users[/][^/ \t\r\n]+[/]'
+    message: "personal absolute path"
+  - id: linux-home-path
+    regex: '[/]home[/][^/ \t\r\n]+[/]'
+    message: "personal absolute path"
 ```
 
-### What hashing does and does not buy
+These are conventions, not secrets. `/Users/<name>/` is a shape you *want*
+readable, so a contributor who trips it understands why without asking.
 
-It must be stated plainly, because the rest of the design depends on not
-believing more than is true: **hashing the terms is obfuscation, not
-confidentiality.**
+The schema is strict, and every violation is a hard failure:
 
-Measured on this machine, a pure-Python single core tests 2.87M SHA-256
-candidates per second. A ten-million-entry wordlist of English words and brand
-names therefore falls in **3 seconds**, and about a millisecond on a GPU. The
-hashes are unsalted by necessity — the check must run in a fresh clone with no
-external key — so anyone who wants a redacted term back can have it.
+- the document root has exactly `version` and `patterns`
+- `version` is the integer `1`
+- `patterns` is a non-empty list
+- every entry has exactly the non-empty string fields `id`, `regex`, `message`
+- ids and regexes are unique
+- duplicate YAML keys, unknown keys, and an uncompilable regex all fail
+- a missing, unreadable, malformed or empty configuration fails
 
-What hashing genuinely buys is worth having anyway:
+**There is no self-exemption.** An earlier revision exempted
+`publishability.yaml` from its own pattern scan so the regexes would not match
+themselves, which would have let a personal path hide in a comment or a
+`message` field. Instead, patterns are written so they do not match their own
+configuration line — the bracketed-slash form above is why `[/]Users[/]` is
+written that way rather than `/Users/`. If a configured pattern matches
+anything else in that file, that is an ordinary finding.
 
-- the words are not greppable, not indexed by search engines, and not returned
-  by GitHub code search
-- a reader browsing the repository does not learn them incidentally
-- and, the actual point, a contributor cannot reintroduce one without CI
-  failing
+Each pattern's `regex` is bounded in length, and matching runs under a time
+budget, because `re` compiling successfully says nothing about catastrophic
+backtracking.
 
-The primary purpose of this check is preventing reintroduction, and for that
-the hash strength is irrelevant. Confidentiality of the term itself is a
-secondary, weak property, and the spec claims nothing more. An adopter with a
-term that genuinely must stay secret should keep it in a private fork's
-denylist rather than trusting this file, and section 9 says so.
+### Gate 2 — private term scanner
 
-Two sections, because the two kinds of forbidden content fail differently:
+The denylist lives **outside the repository**, at a path given by
+`PUBLISHABILITY_TERMS_FILE`:
 
-- A **term** is a secret word. It must be hashed to be committable at all.
-- A **pattern** is a convention, not a secret. `/Users/<name>/` is a shape you
-  *want* readable, so a contributor who trips it understands why without having
-  to ask.
-
-Neither section compromises the other, and the file stays publishable as-is —
-which matters, because an adopter should be able to fork this repository and
-add their own private terms without publishing them.
-
-### Matching semantics
-
-- **Terms.** For each configured length `n`, the lowercased line is scanned as
-  overlapping `n`-grams: every window `line[i:i+n]` is SHA-256'd and compared
-  against the hashes configured at that length.
-
-  The obvious cheaper rule — tokenise on `[a-z0-9]+` and hash whole tokens —
-  was specified first and rejected on measurement. It misses a term embedded in
-  a longer alphanumeric run, which is exactly how one reappears in code:
-
-  | Input | token scan | `n`-gram scan |
-  | --- | --- | --- |
-  | `***REMOVED***-alerting` | hit | hit |
-  | `***REMOVED***.` | hit | hit |
-  | `***REMOVED***_RULES` | hit | hit |
-  | `***REMOVED***Alerting` | **miss** | hit |
-  | `***REMOVED***2` | **miss** | hit |
-
-  The `n`-gram scan costs 0.12s against this repository's 278k tracked
-  characters, versus 0.01s for tokens. Both are free; only one is correct.
-
-  Storing `length` is what makes the window sizable. It leaks the term's
-  length, which given the section above changes nothing material.
-- **Patterns.** `re.search(regex, line)` per line, case-sensitive.
-- **Findings** are `path:line: <hint>`. The matched text is never printed, for
-  terms or for patterns: a pattern's match can itself be the private value.
-- **File set.** `git ls-files`, which is the definition of "what publishing
-  would expose". Files containing a NUL byte in their first 8000 bytes are
-  treated as binary and skipped.
-
-A skipped file must never be indistinguishable from a scanned one. Because the
-`CHECKS` contract is "returned strings fail the build", a skip cannot be a
-finding, so the check prints one line per skipped file to stdout:
-
-```
-[publishability] skipped (binary, not scanned): path/to/file
+```yaml
+version: 1
+terms:
+  - id: private-term-01
+    value: "<plaintext term>"
 ```
 
-The repository currently has no binary tracked files — dashboards are JSON — so
-this output is expected to be empty, and a line appearing in it is information a
-reviewer needs.
+Ids are opaque. `private-term-01`, never `former-employer`: the id appears in
+findings and in any report, and a descriptive id re-creates the crib that made
+the hash weak. Values are never printed, and a finding is
+`path:line: <opaque-id>`.
 
-### Self-reference
+The scanner fails before scanning if the variable is unset, the file is
+missing, the schema is malformed, the list is empty, or two terms normalise
+identically. There is no mode in which "the private gate could not run" is
+reported as "the private gate found nothing".
 
-`publishability.yaml` is exempt from the **pattern** scan and only from it. Its
-`regex` values would otherwise match themselves. It is still scanned for terms,
-where by construction it can contain none. The exemption is narrow enough that
-nothing private can hide behind it: a term cannot be stored there in plaintext
-without failing the term scan.
+#### Matching
 
-Tests exercise the *mechanism* with synthetic patterns of their own
-(`INTERNAL-[0-9]+`), never the real configuration's patterns, so test fixtures
-cannot collide with the live denylist. One test asserts the real
-`publishability.yaml`'s personal-path pattern behaves, against a string built by
-concatenation so the literal never appears in a tracked file.
+Terms are normalised with Unicode NFKC then `casefold()`, and matched as
+literal substrings — not tokens. Tokenising on `[a-z0-9]+` was specified in an
+earlier revision and rejected on measurement: it misses a term embedded in a
+longer identifier, which is exactly how one reappears in code. Substring
+matching over normalised text catches `TERM-B-alerting`, `TERM-Balerting`,
+`TERM-B2`, `TERM-B.` and `TERM-B_RULES` alike.
 
-### Adding a term
+Substring matching alone still missed five forms found by review, so each file
+is scanned through several views, with the term normalised the same way:
 
-```
-make add-private-term
-```
+| View | Catches |
+| --- | --- |
+| normalised source text | ordinary occurrences, any case, inside identifiers |
+| separators and format characters removed | `f-l-y`, a term broken by punctuation |
+| line breaks removed | a term split across a wrapped line |
+| inserted digits removed (terms with no digits) | `t3rm`-style padding |
+| one pass of URL percent-decoding | `%62` inside a URL |
+| decoded string scalars of valid JSON and YAML | `b` escapes |
+| one decoded layer of Base64 runs ≥ 8 chars | `Zm…` blobs |
 
-Reads the term via `getpass`, so it reaches neither the shell history nor a
-terminal transcript, prompts for a hint on stdin normally, and appends an entry
-carrying the hash, the length and the hint. It refuses a term shorter than four
-characters, since a three-character term matches half the repository as an
-`n`-gram and the hash cannot be inspected afterwards to find out why.
+Arbitrary encryption, compression and nested encodings stay outside the
+automated guarantee, and section 9 says so. When a match is found only in a
+transformed view and cannot be mapped to an exact line, the finding reports the
+path and the opaque id without inventing a line number.
 
-When the new term already matches the tracked tree, it prints the number of
-matching files — never their contents — and warns that `make check` will now
-fail until they are cleaned up. It still writes the entry: section 7's build
-order depends on exactly this state being reachable, since observing the
-failure is what proves the check works against the real defect. The warning
-exists so that reaching it by accident is loud, not so that reaching it
-deliberately is blocked.
+### File discovery, fail-closed
 
-This is the one place where the general rule against putting secrets on a
-command line has a supported alternative, and the Makefile target exists so
-nobody improvises one.
+Discovery is where a scanner silently scans nothing, so every path is
+accounted for:
 
-### Registration
+- `git ls-files --cached -z`, **with its exit status checked**. An unchecked
+  subprocess returning empty is a scanner that passes by scanning zero files.
+- also `git ls-files --others --exclude-standard -z`, so a file a later
+  ordinary `git add` would sweep in is not unchecked today.
+- regular files are read in full
+- an unreadable, missing or non-UTF-8 file is a **finding**
+- a NUL byte anywhere in a file is a **finding**
+- symlinks and gitlinks are **findings**
+- discovery failure, a duplicate path, or a path escaping the repository root
+  is a **finding**
 
-A new entry in the existing `CHECKS` dict in `scripts/rulecheck.py`, alongside
-`layout`, `contract`, `fixtures`, `envmatcher`, `ownership`, `codeowners` and
-`dashboards`. It takes `root` like every check but one, returns a list of
-finding strings, and needs no change to `main`.
+An earlier revision skipped binary files with a note on stdout. A NUL byte was
+therefore a one-character bypass. There are no binary skips and no stdout-only
+caveats: this repository has no binary tracked files, so rejecting them
+outright is cheaper and safer than an allowlist, and adding binary assets later
+is a separate design.
 
-A missing or malformed `publishability.yaml` is a **hard failure**, not a
-warning and not a skip. The unconfigured-ownership precedent does not apply:
-ownership ships deliberately unconfigured because only the adopter can know
-their organisation, whereas an absent denylist means the check cannot run at
-all. "The check could not run" must never be reportable as "the check found
-nothing".
+### What runs where
 
-## 4. Documents
+| | Gate 1 (patterns) | Gate 2 (private terms) |
+| --- | --- | --- |
+| `make check` locally | always | when `PUBLISHABILITY_TERMS_FILE` is set |
+| `make check` in CI | always | never — CI must not hold the secret |
+| Cutover runbook | required clean | required clean |
 
-`***REMOVED***` becomes "the prior system" throughout the spec and the one line in
-the plan. The `~/git/old-work` path reference goes.
+When gate 2 does not run, `make check` records a **caveat** through the
+existing mechanism in `scripts/check.sh` — the same one used for unconfigured
+ownership and for a missing `lokitool` — so the run ends in `CHECKS
+INCOMPLETE`, naming the private scan as not performed. It never ends in `all
+checks passed`.
 
-Appendix A keeps all 16 evidence rows, each rewritten to state a failure mode
-and the design response rather than an audit finding. The repository inventory
-table, file counts and commit counts are deleted: they are the identifying
-detail, and they teach nothing that the failure mode itself does not.
+This reuses a reviewed idiom rather than inventing one, and it is why gate 2 is
+not a wholly separate command: a separate command is one nobody remembers to
+run, and a caveat is the repository's established way of saying "this ran, that
+did not".
 
-The rewrite must preserve the arguments. The point of Appendix A is that every
-rule in the design exists because something specific went wrong, and a
-generalised lesson that no longer supports its rule has been rewritten too far.
+### Registration and ownership
 
-## 5. Second example team
+Gate 1 registers as `publishability` in the existing `CHECKS` dict in
+`scripts/rulecheck.py`, taking `root` and returning findings like its
+neighbours. Every discovery, configuration and decoding error becomes a
+finding, never an empty result and never an uncaught traceback.
 
-`rules/payments/mimir/checkout-alerts.yaml` with a `checkout-alerts-tests.yaml`
-fixture, a `dashboards/payments/` dashboard, and CODEOWNERS entries for both
-paths.
+`/publishability.yaml` is added to `.github/CODEOWNERS` **and** to
+`PLATFORM_OWNED_PATHS` in `scripts/rulecheck.py`. Without the second, a team
+could take ownership of the gate that governs it — the exact defect a prior
+review found four separate times in this repository, and one this design
+reintroduced by adding a governing file and forgetting to govern it.
 
-This is example content, but it is not only example content. The existing
-checks for the multi-team ownership boundary are exercised today only by unit
-tests against synthetic CODEOWNERS files; no second team exists in the tree.
-The single most consequential defect found in the whole build — that adding a
-second Mimir rule always failed CI, because a test asserted the entire render
-contained exactly one ConfigMap — survived every review precisely because
-nobody had tried to use the repository for its stated purpose. A second team in
-the tree makes that class of defect impossible to ship again.
+## 4. Second-team fixture
 
-The new content must satisfy every existing check with no exemptions: the
-`rules/<team>/<target>/<service>[-<type>]-alerts.yaml` naming contract, the
-canonical `deployment_environment=~"..."` matcher form, a passing promtool unit
-test, and a dashboard uid unique across the tree.
+`rules/payments/mimir/checkout-alerts.yaml`, its `checkout-alerts-tests.yaml`
+fixture, a dashboard under `dashboards/payments/`, and sole-owner CODEOWNERS
+entries for both team paths. Documented placeholder URLs and labels only.
 
-## 6. History
+An independent PR, before the freeze. Acceptance criteria are explicit because
+"add an example team" does not by itself test anything:
 
-`git filter-repo --replace-text` over all 39 commits, redacting both terms in
-diffs and in `e05b539`'s commit message. Four commits change; the replacements
-file is written to the session scratchpad, never into the repository, and
-deleted afterwards. `git-filter-repo` 2.47.0 is installed at
-`/opt/homebrew/bin/git-filter-repo`.
+- `check_codeowners` resolves `rules/payments/` and `dashboards/payments/`
+  solely to the payments owner
+- Helm renders the platform and payments Mimir source paths exactly once each
+- `render_assert.py` reconciles both source files with their ConfigMaps
+- `tests/chart_test.sh` names the payments ConfigMap explicitly and asserts no
+  repository-wide total ConfigMap count
+- the promtool fixture has at least one firing and one non-firing evaluation
+- the dashboard has a unique stable uid and no private datasource uid, hostname
+  or tenant
+- **deleting the payments rule, or either ownership entry, makes at least one
+  test fail**
 
-The remote is then **deleted and recreated**, not force-pushed.
+That last criterion is the point. The most consequential defect in the whole
+build — adding a second Mimir rule always failed CI, because a test asserted
+the entire render contained exactly one ConfigMap — survived every review
+because nobody had used the repository for its stated purpose. A second team
+that no test depends on would repeat that mistake in a new place.
 
-This is the part worth being explicit about. A force-push leaves the old
-commits on GitHub as dangling objects, reachable by SHA through the API until
-GitHub garbage-collects them on a schedule nobody outside GitHub controls. The
-repository is hours old, private, and has no issues, pull requests, forks or
-stars, so deleting and recreating it costs nothing and is the only version of
-this step that can honestly be called complete.
+It makes the one-ConfigMap assumption visible. It does not make future render
+defects impossible, and this document does not claim it does.
 
-`gh repo delete` requires the `delete_repo` scope, which the current token does
-not carry (`gist`, `read:org`, `repo`). The scope must be added with
-`gh auth refresh -h github.com -s delete_repo`, which is interactive; if it
-cannot be obtained, the fallback is a force-push plus an explicit statement
-that dangling objects remain, never a silent downgrade.
+## 5. Document rewrite
+
+`TERM-B` becomes "the prior system" throughout the prior design and the one
+line in the plan. The local archive path it cites, which gate 1's personal-path
+pattern would flag anyway, goes with it. This spec is itself
+in scope: nothing is exempt for being documentation, a plan, or scanner test
+material.
+
+Appendix A of the prior design keeps **every** evidence row. Its repository
+inventory table, file counts and commit counts are deleted: they identify, and
+they teach nothing the failure mode does not.
+
+"Do not generalise too far" is not a testable instruction, so acceptance is
+mechanical:
+
+- every row still names a concrete mechanism (a specific expression, option,
+  filename pattern or code path), not only an abstract lesson
+- every row still supports the specific design rule that cites it, and the
+  citation still resolves
+- rows recording a correction to a previously wrong claim keep both the wrong
+  claim and the correction, since the correction is the evidence
+- the row count is unchanged, and a reviewer diffs old against new row by row
+- no row names an organisation, repository, or person
+
+A generalised lesson that no longer supports its rule has been rewritten too
+far, and the row-by-row diff is how that is caught rather than asserted.
+
+## 6. Destructive cutover
+
+A runbook with a human go/no-go, executed once, attended.
+
+### Freeze report
+
+Generated **after all content changes are frozen**, written outside the
+repository, recording by opaque term id:
+
+- matches in the tracked and non-ignored untracked working tree
+- matches in every reachable blob and path under every fetched ref
+- commit and annotated-tag messages
+- ref names, and author, committer and tagger identities
+- `.gitmodules`, gitlinks and Git LFS objects
+- the exact freeze commit and the complete remote-ref inventory
+
+### Rewrite
+
+`git filter-repo` with **both** `--replace-text` and `--replace-message`, and
+`--sensitive-data-removal`.
+
+`--replace-text` alone does not rewrite commit messages — verified against the
+installed 2.47.0 help, which documents them as separate options. An earlier
+revision of this spec said one flag would do both, and would have shipped a
+rewrite that left the codename in a commit message. `--sensitive-data-removal`
+additionally fetches all fetchable refs and reports LFS and cleanup concerns.
+
+Version is pinned and discovered on `PATH`, not hardcoded to a Homebrew prefix.
+The replacements file is written to the session scratchpad, never into the
+repository, and deleted afterwards.
 
 ### Verification
 
-The rewrite is verified, not assumed:
+Against the rewritten repository, not assumed:
 
-- `git log --all -S<term> --pickaxe-regex -i` returns nothing, for both terms
-- `git log --all --grep=<term> -i` returns nothing
-- a fresh `git clone` of the recreated remote passes `make check`
-- `make check` on that clone exits 0 with no `CHECKS INCOMPLETE` caveat other
-  than the ownership one, which is deliberate and documented
+- the freeze report re-run over all reachable objects returns nothing
+- no reachable blob, path, ref name, message, tag or identity matches
+- a fresh clone of the recreated remote passes `make check` with both gates
+  clean, the only caveat being the deliberate unconfigured-ownership one
+
+`git log -S` is pickaxe *history selection*, not an exhaustive scan of
+reachable blobs, and is not sufficient on its own.
+
+### Remote
+
+Delete and recreate. **A force-push is not an acceptable fallback** — it leaves
+the old objects reachable by SHA through the API. Deletion is not erasure
+either: GitHub documents deleted repositories as restorable for 90 days, so the
+cutover is a reduction of exposure, not a guarantee against it, and the account
+holder must not restore the old repository.
+
+`gh repo delete` needs the `delete_repo` scope, which the current token lacks
+(`gist`, `read:org`, `repo`). Obtain it with
+`gh auth refresh -h github.com -s delete_repo`, which is interactive. If it
+cannot be obtained, **stop and report** rather than downgrading to a
+force-push.
+
+### Branch protection
+
+In scope, and a gate on the claim in section 9 rather than a documentation
+task. Both protection APIs return HTTP 403 while the repository is private —
+verified against `POST /repos/{owner}/{repo}/rulesets` and
+`PUT /repos/{owner}/{repo}/branches/main/protection`, both answering
+`"Upgrade to GitHub Pro or make this repository public to enable this
+feature."` So protection is installed immediately after the sanitised
+repository becomes public.
+
+Required: pull requests, the CI status context, dismissal of stale approvals,
+an up-to-date branch, blocked force pushes and blocked deletion. CODEOWNER
+approval is required once the repository names owners GitHub can resolve.
+Verified by reading the ruleset back through the API **and** by a negative test
+PR. Updating `docs/branch-protection.md` is not acceptance.
+
+If protection cannot be installed or verified, the repository goes private
+again. Without it, a pull request can modify the scanner, its configuration,
+the Makefile and the workflow in the same commit that adds forbidden content,
+and the required check then runs the contributor's version of itself.
 
 ## 7. Build order
 
-The order is chosen so the work is test-driven at the repository level, not
-only at the unit level:
-
-1. **Publishability check, TDD.** Failing tests first, then the check, then
-   registration. At this point `publishability.yaml` is empty and the check
-   passes vacuously — which is itself a state the tests must cover.
-2. **Add the two terms.** `make check` now **fails**, pointing at the spec.
-   This is the red state, and it proves the check works against the real
-   defect rather than only against fixtures.
-3. **Rewrite the documents.** `make check` goes green.
-4. **Second example team.** Green throughout; the multi-team paths now carry
-   real content.
-5. **History rewrite and remote recreate.** Last, because it invalidates every
-   SHA and should happen once, over the finished tree.
-
-Step 2 failing is a required observation, not an accident. An implementer who
-reaches step 3 without having seen step 2 fail has not established that the
-check does anything.
+1. **Gate 1, TDD.** Failing tests, then the check, then registration and
+   ownership wiring.
+2. **Gate 2, TDD.** Failing tests against synthetic terms in a temporary
+   out-of-repo file, then the scanner, then the `make check` caveat wiring.
+3. **Run gate 2 against the real denylist.** It **fails**, pointing at the
+   documents. This is a required observation: an implementer who has not seen
+   it fail has not established the scanner detects anything.
+4. **Document rewrite.** Gate 2 goes clean.
+5. **Second-team fixture** — independent, any time before the freeze.
+6. **Cutover runbook** — attended, with the go/no-go checkpoint.
 
 ## 8. Testing
 
 TDD throughout: failing test, observed failing, then implementation.
 
-New pytest coverage for the publishability check:
+Gate 1: schema validation for each malformed shape listed in section 3; a
+pattern hit reported with its message and no matched text; no self-exemption,
+proven by a temporary pattern that matches content inside `publishability.yaml`
+itself; each configured id testable independently; a pattern whose regex is
+uncompilable, over-long, or backtracking-prone is rejected.
 
-- a term hash matching text in a tracked file is reported
-- the finding contains the hint and **not** the term or the matched text
-- a term embedded in a longer identifier is caught: the five inputs tabulated
-  in section 3 are the test cases, including the two the rejected token rule
-  missed
-- case-insensitivity: `***REMOVED***`, `***REMOVED***` and `***REMOVED***` all match
-- two terms of different lengths are both found in one file, so the per-length
-  window loop is exercised rather than only its first iteration
-- a pattern match is reported with its hint
-- `publishability.yaml` is exempt from patterns but not from terms
-- a binary file is skipped, and the skip is visible
-- a missing `publishability.yaml` fails
-- a malformed `publishability.yaml` fails: not a mapping, `terms` not a list,
-  an entry missing `hash`, `length` or `hint`, a hash that is not `sha256:` +
-  64 hex, a `length` that is not an integer of at least 4, a `regex` that does
-  not compile
-- an empty but well-formed config passes
+Gate 2: each of the seven views in the matching table, with a concrete input
+per row; normalisation of case and Unicode; findings carry the opaque id and
+never the term or matched text; a term of a different length found in the same
+file, so the loop is exercised past its first iteration; missing env var,
+missing file, empty list, malformed schema and colliding terms each fail
+closed.
 
-The existing 109 tests stay green. The final gate is `make check` exiting 0 on
-a fresh clone of the recreated remote, plus the history greps in section 6.
+Discovery: `git ls-files` non-zero exit is a finding, not an empty scan; NUL
+byte, symlink, gitlink, unreadable file, non-UTF-8 file and path-escape each
+produce a finding; an untracked non-ignored file is scanned.
+
+All pre-existing tests stay green. **The numeric test count is not an
+acceptance criterion** — "109 still pass" says nothing about whether the new
+ones test anything.
+
+Final acceptance is the section 6 verification list: freeze report clean over
+all reachable objects, fresh-clone `make check` clean with both gates, branch
+protection read back, and the negative test PR rejected.
 
 ## 9. What this does not make safe
 
-Publishing remains a judgement, and this check narrows it rather than settling
-it. It catches a configured term or pattern in a tracked file. It does not
-catch a private detail nobody thought to add to the denylist, a design decision
-that reveals something by its shape rather than its wording, or anything in an
-untracked file that a later `git add` would sweep in.
+Publishing remains a judgement. This narrows it; it does not settle it.
 
-It also does not keep the configured terms secret. Section 3 measures this: an
-unsalted SHA-256 of a dictionary word falls in seconds. A term whose secrecy
-actually matters does not belong in a published denylist at all; keep it in a
-private fork's copy of this file and accept that the public one is a weaker
-net.
+The gates catch a configured pattern or a configured term, in the views listed
+in section 3. They do not catch a private detail nobody added to the denylist,
+a design decision that reveals something by its shape rather than its wording,
+or a term hidden under encryption, compression or nested encoding.
+
+**There is no CI enforcement of private terms**, by design: CI runs
+pull-request-controlled code and must not hold the secret. The private gate
+runs locally, before push. Closing this needs a trusted workflow that takes its
+own implementation from the protected base branch, fetches candidate blobs
+through the API, treats them strictly as data, never checks out or executes the
+PR head, and fails when its secret is absent. That is deferred, and it is a
+**hard gate, not a preference**: until it exists, this repository must not
+merge pull requests from outside contributors.
+
+Even with it, CI cannot prevent *initial* disclosure in a public pull request
+or fork, because those git objects exist before CI starts. Nothing in this
+design changes that.
+
+And the cutover reduces exposure rather than erasing it: deleted repositories
+remain restorable for 90 days.
 
 The honest claim is: the repository contains no configured private term, its
-history contains none, and reintroducing one fails the build. That is a
-materially different claim from "this repository is safe to publish", and the
-README should not make the second one.
+history contains none, reintroducing one fails locally before push, and the
+default branch is protected. That is materially narrower than "this repository
+is safe to publish", and the README should not make the second claim.
