@@ -24,6 +24,104 @@ from pathlib import Path
 
 import yaml
 
+PUBLISHABILITY_FILE = "publishability.yaml"
+PUBLISHABILITY_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+PUBLISHABILITY_MAX_REGEX = 512
+PUBLISHABILITY_MAX_MESSAGE = 200
+
+
+class PublishabilityConfigError(Exception):
+    """The Gate 1 configuration is unusable. Always fatal, never a warning."""
+
+
+class _NoDuplicateKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects duplicate mapping keys instead of silently
+    keeping the last one. A duplicate key is how a second, unreviewed value
+    hides behind a reviewed one."""
+
+
+def _no_duplicate_keys(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise PublishabilityConfigError(f"duplicate key {key!r} in {PUBLISHABILITY_FILE}")
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_NoDuplicateKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys
+)
+
+
+def load_publishability_config(root: Path) -> list[dict]:
+    path = root / PUBLISHABILITY_FILE
+    if not path.is_file():
+        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} not found at {path}")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} is not UTF-8") from exc
+    try:
+        docs = list(yaml.load_all(raw, Loader=_NoDuplicateKeyLoader))
+    except yaml.YAMLError as exc:
+        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} is not valid YAML: {exc}") from exc
+    if len(docs) != 1:
+        raise PublishabilityConfigError(
+            f"{PUBLISHABILITY_FILE} must contain exactly one YAML document, found {len(docs)}"
+        )
+    doc = docs[0]
+    if not isinstance(doc, dict):
+        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} must be a mapping")
+    if set(doc) != {"version", "patterns"}:
+        raise PublishabilityConfigError(
+            f"{PUBLISHABILITY_FILE} root must have exactly 'version' and 'patterns'"
+        )
+    version = doc["version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} version must be the integer 1")
+    patterns = doc["patterns"]
+    if not isinstance(patterns, list) or not patterns:
+        raise PublishabilityConfigError(f"{PUBLISHABILITY_FILE} patterns must be a non-empty list")
+
+    seen_ids: set[str] = set()
+    seen_regexes: set[str] = set()
+    for entry in patterns:
+        if not isinstance(entry, dict) or set(entry) != {"id", "regex", "message"}:
+            raise PublishabilityConfigError(
+                "each pattern must have exactly 'id', 'regex' and 'message'"
+            )
+        pid, regex, message = entry["id"], entry["regex"], entry["message"]
+        if not isinstance(pid, str) or not PUBLISHABILITY_ID_RE.match(pid):
+            raise PublishabilityConfigError(f"pattern id {pid!r} must match ^[a-z][a-z0-9-]{{0,63}}$")
+        if not isinstance(regex, str) or not 1 <= len(regex) <= PUBLISHABILITY_MAX_REGEX:
+            raise PublishabilityConfigError(
+                f"pattern {pid} regex must be 1 to {PUBLISHABILITY_MAX_REGEX} code points"
+            )
+        if not isinstance(message, str) or not 1 <= len(message) <= PUBLISHABILITY_MAX_MESSAGE:
+            raise PublishabilityConfigError(
+                f"pattern {pid} message must be 1 to {PUBLISHABILITY_MAX_MESSAGE} code points"
+            )
+        if any(c == "\n" or c == "\r" or (ord(c) < 32) for c in message):
+            raise PublishabilityConfigError(
+                f"pattern {pid} message must contain no line break or control character"
+            )
+        try:
+            compiled = re.compile(regex)
+        except re.error as exc:
+            raise PublishabilityConfigError(f"pattern {pid} regex does not compile: {exc}") from exc
+        if compiled.search(""):
+            raise PublishabilityConfigError(f"pattern {pid} regex matches the empty string")
+        if pid in seen_ids:
+            raise PublishabilityConfigError(f"pattern ids must be unique, {pid!r} repeats")
+        if regex in seen_regexes:
+            raise PublishabilityConfigError(f"pattern regexes must be unique, {pid!r} repeats one")
+        seen_ids.add(pid)
+        seen_regexes.add(regex)
+    return patterns
+
+
 TARGETS = ("mimir", "loki", "prometheus")
 ENVIRONMENTS = ("dev", "staging", "prod")
 SEVERITIES = ("info", "warning", "error", "critical")

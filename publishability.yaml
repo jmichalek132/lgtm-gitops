@@ -1,0 +1,21 @@
+# Gate 1: public, readable, NON-SECRET patterns only.
+#
+# Never put a private term here, hashed or otherwise. A committed digest of a
+# secret word is an offline confirmation oracle, not a redaction: an unsalted
+# SHA-256 of a dictionary word falls to a ten-million-entry wordlist in about
+# three seconds on one CPU core. Private terms belong in the out-of-repository
+# denylist that scripts/privatescan.py reads. See section 3 of
+# docs/superpowers/specs/2026-08-14-publishable-example-design.md.
+#
+# Patterns are written so they do not match their own configuration line. That
+# is why the leading slash is bracketed: the naive form '/Users/[^/ ]+/' DOES
+# match the line it is written on, which is what made an earlier design exempt
+# this file from its own scan. There is no exemption now.
+version: 1
+patterns:
+  - id: macos-home-path
+    regex: '[/]Users[/][^/ \t\r\n]+[/]'
+    message: "personal absolute path"
+  - id: linux-home-path
+    regex: '[/]home[/][^/ \t\r\n]+[/]'
+    message: "personal absolute path"
