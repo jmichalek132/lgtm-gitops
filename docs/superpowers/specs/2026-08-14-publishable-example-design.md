@@ -303,13 +303,22 @@ catch, and was rejected because it also creates a false negative for a term
 embedded mid-word and separator-split. The consequence for triage is real and
 is why findings must carry the mask that produced them.
 
-A raw-source content match reports `path:line: <opaque-id>`, plus the deletion
-mask that produced it. A transformed content match reports `path: <opaque-id>`
-without inventing a line. After a valid denylist has loaded, every repository
-path is checked with the complete matching algorithm before it is printed; if
-the path matches, the entire path is replaced by `<redacted-path>` in every
-finding. Non-matching paths are escaped before printing so control characters
-cannot alter logs.
+Every content match reports `path: <opaque-id>`, plus the view and the deletion
+mask that produced it. After a valid denylist has loaded, every repository path
+is checked with the complete matching algorithm before it is printed; if the
+path matches, the entire path is replaced by `<redacted-path>` in every finding.
+Non-matching paths are escaped before printing so control characters cannot
+alter logs.
+
+An earlier revision required a line number for raw-source matches specifically.
+That is dropped, deliberately. A position inside a transformed view does not map
+back to a source line, so line numbers would exist for one view and not the
+others, and the matcher does not return match positions at all. The loss is
+small: the operator reading a Gate 2 finding is by definition the holder of the
+denylist, so for an unmasked source match they can locate the occurrence in
+their own checkout, and for a decoded or mask-derived match a line number would
+have been misleading rather than helpful. Gate 1, which matches raw text with a
+public pattern, does report `path:line:` and is unaffected.
 
 **This redaction prevents direct emission of matching path characters. It does
 not prevent inference** from the existence, count, order or grouping of findings
