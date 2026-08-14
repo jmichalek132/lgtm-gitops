@@ -147,9 +147,31 @@ def test_pattern_hit_is_reported_with_message_not_matched_text():
 
 
 def test_multiple_lines_report_correct_line_numbers():
+    """Multiple hits on different lines in one file, not just a single hit,
+    so incremental line tracking across successive matches is exercised."""
     patterns = [{"id": "probe", "regex": "INTERNAL-[0-9]+", "message": "probe"}]
-    findings = scan_text_with_patterns("x.txt", "clean\nINTERNAL-7\nclean\n", patterns)
-    assert findings == ["x.txt:2: probe"]
+    findings = scan_text_with_patterns(
+        "x.txt", "clean\nINTERNAL-7\nclean\nINTERNAL-9\nclean\nINTERNAL-11\n", patterns
+    )
+    assert findings == ["x.txt:2: probe", "x.txt:4: probe", "x.txt:6: probe"]
+
+
+def test_match_on_first_line_reports_line_one():
+    patterns = [{"id": "probe", "regex": "INTERNAL-[0-9]+", "message": "probe"}]
+    findings = scan_text_with_patterns("x.txt", "INTERNAL-1\nclean\nclean\n", patterns)
+    assert findings == ["x.txt:1: probe"]
+
+
+def test_match_on_last_line_reports_correct_line():
+    patterns = [{"id": "probe", "regex": "INTERNAL-[0-9]+", "message": "probe"}]
+    findings = scan_text_with_patterns("x.txt", "clean\nclean\nINTERNAL-1\n", patterns)
+    assert findings == ["x.txt:3: probe"]
+
+
+def test_match_with_no_trailing_newline_reports_correct_line():
+    patterns = [{"id": "probe", "regex": "INTERNAL-[0-9]+", "message": "probe"}]
+    findings = scan_text_with_patterns("x.txt", "clean\nclean\nINTERNAL-1", patterns)
+    assert findings == ["x.txt:3: probe"]
 
 
 def test_control_characters_in_path_are_escaped():
@@ -167,6 +189,45 @@ def test_catastrophic_backtracking_yields_a_finding_not_a_hang():
     assert len(findings) == 1
     assert "evil" in findings[0]
     assert "deadline" in findings[0]
+
+
+def test_worker_exception_becomes_a_finding_not_an_empty_result():
+    """A crash while matching, not just a timeout, must surface as a finding
+    naming the pattern. The old code let a dead worker's empty queue collapse
+    into an empty list via `except Exception: return []`, which is
+    indistinguishable from a clean scan that found nothing: exactly the
+    silent-empty-result the constraint forbids. `text=None` reliably crashes
+    the worker inside `finditer`, since re expects a string-like object."""
+    patterns = [{"id": "boom", "regex": "x", "message": "probe"}]
+    findings = scan_text_with_patterns("x.txt", None, patterns)
+    assert len(findings) == 1
+    assert "boom" in findings[0]
+    assert "could not be checked" in findings[0]
+
+
+def test_large_result_completes_well_inside_the_deadline_with_correct_lines():
+    """The old code had two compounding bugs on a large result: joining the
+    worker process before draining its queue deadlocks once the pickled
+    result is bigger than the pipe buffer (the child cannot exit until the
+    write completes, and the parent is blocked in join rather than reading),
+    and recomputing text.count("\\n", 0, m.start()) from the START of the
+    text on every match is O(matches x text length), slow enough on its own
+    to trip the deadline for perfectly ordinary text. Either bug silently
+    disables the pattern for every remaining file in the scan. This uses the
+    reviewer's reproduction numbers: 40,000 matches in a ~1.4MB file."""
+    match_count = 40_000
+    pad = "z" * 12
+    lines = [f"{pad} hit{i} {pad}" for i in range(match_count)]
+    text = "\n".join(lines) + "\n"
+    assert 1_300_000 <= len(text) <= 1_500_000  # matches the reviewer's "1.4MB file"
+
+    patterns = [{"id": "many", "regex": "hit[0-9]+", "message": "probe"}]
+    findings = scan_text_with_patterns("x.txt", text, patterns, deadline=10.0)
+
+    assert len(findings) == match_count
+    assert not any("deadline" in f for f in findings)
+    assert findings[0] == "x.txt:1: probe"
+    assert findings[-1] == f"x.txt:{match_count}: probe"
 
 
 @pytest.mark.xfail(reason="iter_scannable_files arrives in Task 8", strict=True)

@@ -133,46 +133,78 @@ def escape_path(path: str) -> str:
 
 
 def _search_worker(regex: str, text: str, queue) -> None:
-    matched = [m for m in re.compile(regex).finditer(text)]
-    queue.put([text.count("\n", 0, m.start()) + 1 for m in matched])
+    try:
+        pattern = re.compile(regex)
+        starts = [m.start() for m in pattern.finditer(text)]
+        line_nos = []
+        line_no = 1
+        pos = 0
+        for start in starts:
+            line_no += text.count("\n", pos, start)
+            pos = start
+            line_nos.append(line_no)
+        queue.put(("ok", line_nos))
+    except BaseException as exc:
+        queue.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 def _search_with_deadline(regex: str, text: str, deadline: float):
-    """Return a list of 1-based line numbers, or None if the deadline expired.
+    """Return ('ok', [1-based line numbers]), ('error', message) if the worker
+    raised, or ('timeout', None) if the deadline expired.
 
     re has no matching timeout, so the only way to bound a catastrophic
-    backtracking case is to run it somewhere killable.
+    backtracking case is to run it somewhere killable. The result is read
+    from the queue BEFORE joining the process: a worker producing a large
+    result blocks writing to the queue's pipe until something reads it, and
+    joining first would deadlock waiting for an exit that can only happen
+    after the write it is blocking.
     """
     ctx = multiprocessing.get_context("spawn")
     queue = ctx.Queue()
     proc = ctx.Process(target=_search_worker, args=(regex, text, queue), daemon=True)
     proc.start()
-    proc.join(deadline)
-    if proc.is_alive():
+    try:
+        status, payload = queue.get(timeout=deadline)
+    except Exception:
         proc.kill()
         proc.join()
-        return None
-    try:
-        return queue.get_nowait()
-    except Exception:
-        return []
+        return "timeout", None
+    proc.join()
+    return status, payload
 
 
 def scan_text_with_patterns(
     path: str, text: str, patterns: list[dict], deadline: float = PUBLISHABILITY_DEADLINE_SECONDS
 ) -> list[str]:
+    """Scan `text` against every pattern, returning `path:line: message` findings.
+
+    A pattern that trips the deadline is marked `pattern["_disabled"] = True`
+    IN PLACE on the caller's dict, and this function does not itself check
+    that flag: a still-disabled pattern passed in here would simply be
+    scanned again. `check_publishability` is the one that filters on
+    `_disabled` before calling this per file, since `load_publishability_config`
+    returns a fresh list of dicts on every call. A future caller that caches
+    the loaded config across scans instead of reloading it per call would
+    reintroduce cross-call leakage of the `_disabled` flag; that caller, not
+    this function, is the one responsible for deciding when to reset it.
+    """
     findings: list[str] = []
     safe_path = escape_path(path)
     for pattern in patterns:
-        lines = _search_with_deadline(pattern["regex"], text, deadline)
-        if lines is None:
+        status, payload = _search_with_deadline(pattern["regex"], text, deadline)
+        if status == "timeout":
             findings.append(
                 f"{safe_path}: pattern {pattern['id']} exceeded its {deadline}s matching "
                 f"deadline and was disabled for the remaining files"
             )
             pattern["_disabled"] = True
             continue
-        for line_no in lines:
+        if status == "error":
+            findings.append(
+                f"{safe_path}: pattern {pattern['id']} could not be checked: {payload}"
+            )
+            continue
+        for line_no in payload:
             findings.append(f"{safe_path}:{line_no}: {pattern['message']}")
     return findings
 
