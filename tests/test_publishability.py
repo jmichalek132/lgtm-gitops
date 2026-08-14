@@ -335,3 +335,30 @@ def test_discovery_finding_path_is_escaped(tmp_path):
     assert "symlink" in joined
     assert "\r" not in joined
     assert "\\r" in joined
+
+
+def test_publishability_config_is_not_exempt_from_its_own_scan(tmp_path):
+    """Spec section 8: no self-exemption, proven by a temporary pattern that
+    matches content inside publishability.yaml itself.
+
+    Verified by mutation: adding `if path == PUBLISHABILITY_FILE: continue`
+    to check_publishability left all 258 tests green, so nothing pinned this
+    property. The sentinel regex deliberately does not match its own
+    definition line (`sentinel-[0-9]+` needs a digit where the definition has
+    `[`), so the only possible hit is the comment line below it."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    write_config(
+        tmp_path,
+        "version: 1\n"
+        "patterns:\n"
+        "  - id: selfscan\n"
+        "    regex: 'sentinel-[0-9]+'\n"
+        "    message: probe\n"
+        "# sentinel-42 sits on a line the pattern does not define\n",
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+
+    findings = check_publishability(tmp_path)
+    assert findings == ["publishability.yaml:6: probe"], findings
