@@ -17,6 +17,7 @@ human-readable findings. An empty list means the check passed.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import re
 import subprocess
 import sys
@@ -120,6 +121,75 @@ def load_publishability_config(root: Path) -> list[dict]:
         seen_ids.add(pid)
         seen_regexes.add(regex)
     return patterns
+
+
+PUBLISHABILITY_DEADLINE_SECONDS = 1.0
+
+
+def escape_path(path: str) -> str:
+    """Render a path safe to print. A filename can contain control characters,
+    and an unescaped one can rewrite the diagnostic that reports it."""
+    return path.encode("unicode_escape").decode("ascii")
+
+
+def _search_worker(regex: str, text: str, queue) -> None:
+    matched = [m for m in re.compile(regex).finditer(text)]
+    queue.put([text.count("\n", 0, m.start()) + 1 for m in matched])
+
+
+def _search_with_deadline(regex: str, text: str, deadline: float):
+    """Return a list of 1-based line numbers, or None if the deadline expired.
+
+    re has no matching timeout, so the only way to bound a catastrophic
+    backtracking case is to run it somewhere killable.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=_search_worker, args=(regex, text, queue), daemon=True)
+    proc.start()
+    proc.join(deadline)
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+        return None
+    try:
+        return queue.get_nowait()
+    except Exception:
+        return []
+
+
+def scan_text_with_patterns(
+    path: str, text: str, patterns: list[dict], deadline: float = PUBLISHABILITY_DEADLINE_SECONDS
+) -> list[str]:
+    findings: list[str] = []
+    safe_path = escape_path(path)
+    for pattern in patterns:
+        lines = _search_with_deadline(pattern["regex"], text, deadline)
+        if lines is None:
+            findings.append(
+                f"{safe_path}: pattern {pattern['id']} exceeded its {deadline}s matching "
+                f"deadline and was disabled for the remaining files"
+            )
+            pattern["_disabled"] = True
+            continue
+        for line_no in lines:
+            findings.append(f"{safe_path}:{line_no}: {pattern['message']}")
+    return findings
+
+
+def check_publishability(root: Path) -> list[str]:
+    try:
+        patterns = load_publishability_config(root)
+    except PublishabilityConfigError as exc:
+        return [str(exc)]
+    findings: list[str] = []
+    for path, text in iter_scannable_files(root):
+        if isinstance(text, str):
+            active = [p for p in patterns if not p.get("_disabled")]
+            findings.extend(scan_text_with_patterns(path, text, active))
+        else:
+            findings.append(text)  # a discovery finding, already formatted
+    return findings
 
 
 TARGETS = ("mimir", "loki", "prometheus")

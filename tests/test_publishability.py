@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts.rulecheck import PublishabilityConfigError, load_publishability_config
+from scripts.rulecheck import (
+    PublishabilityConfigError,
+    check_publishability,
+    load_publishability_config,
+    scan_text_with_patterns,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -132,3 +137,38 @@ def test_wrong_document_count_fails(tmp_path, body):
     root = write_config(tmp_path, body)
     with pytest.raises(PublishabilityConfigError, match="one YAML document"):
         load_publishability_config(root)
+
+
+def test_pattern_hit_is_reported_with_message_not_matched_text():
+    patterns = [{"id": "probe", "regex": "SECRETSHAPE-[0-9]+", "message": "probe shape"}]
+    findings = scan_text_with_patterns("x.txt", "a SECRETSHAPE-42 b", patterns)
+    assert findings == ["x.txt:1: probe shape"]
+    assert "SECRETSHAPE-42" not in findings[0]
+
+
+def test_multiple_lines_report_correct_line_numbers():
+    patterns = [{"id": "probe", "regex": "INTERNAL-[0-9]+", "message": "probe"}]
+    findings = scan_text_with_patterns("x.txt", "clean\nINTERNAL-7\nclean\n", patterns)
+    assert findings == ["x.txt:2: probe"]
+
+
+def test_control_characters_in_path_are_escaped():
+    patterns = [{"id": "probe", "regex": "INTERNAL-[0-9]+", "message": "probe"}]
+    findings = scan_text_with_patterns("bad\rname.txt", "INTERNAL-1", patterns)
+    assert "\r" not in findings[0]
+    assert "\\r" in findings[0]
+
+
+def test_catastrophic_backtracking_yields_a_finding_not_a_hang():
+    """A pattern that would hang re.search must produce a finding via the
+    worker deadline, and must do so well inside the outer test timeout."""
+    patterns = [{"id": "evil", "regex": "(a+)+$", "message": "probe"}]
+    findings = scan_text_with_patterns("x.txt", "a" * 40 + "!", patterns, deadline=1.0)
+    assert len(findings) == 1
+    assert "evil" in findings[0]
+    assert "deadline" in findings[0]
+
+
+@pytest.mark.xfail(reason="iter_scannable_files arrives in Task 8", strict=True)
+def test_gate1_passes_on_the_real_repository():
+    assert check_publishability(REPO_ROOT) == []
