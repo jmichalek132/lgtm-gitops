@@ -1,4 +1,5 @@
 import base64
+import os
 import stat as stdlib_stat
 import textwrap
 from pathlib import Path
@@ -339,6 +340,17 @@ def test_open_no_symlink_raises_denylisterror_not_oserror_when_the_file_vanishes
             "collide",
         ),
         ("version: 1\nversion: 1\nterms: [{id: private-term-01, value: x}]\n", "duplicate"),
+        ("version: 1\nterms: [1, 2, 3]\n", "exactly"),
+        ("version: 1\nterms: [{id: 123, value: x}]\n", "id"),
+        ("version: 1\nterms: [{id: private-term-01, value: 123}]\n", "value"),
+        ("version: true\nterms: [{id: private-term-01, value: x}]\n", "version"),
+        ("version: 1\nterms: 'not-a-list'\n", "non-empty"),
+        (
+            "version: 1\nterms: [{id: private-term-01, value: x}]\n"
+            "---\nversion: 1\nterms: [{id: private-term-02, value: y}]\n",
+            "exactly one YAML document",
+        ),
+        ("version: 1\nterms: [{id: private-term-01, value: 'x'\n", "not valid YAML"),
     ],
 )
 def test_malformed_denylist_fails(tmp_path, body, expected):
@@ -407,3 +419,24 @@ def test_non_utf8_denylist_fails_without_printing_the_bytes(tmp_path):
     with pytest.raises(DenylistError, match="UTF-8") as exc:
         load_denylist({"PUBLISHABILITY_TERMS_FILE": str(path)}, REPO_ROOT)
     assert DENYLIST_PLACEHOLDER in str(exc.value)
+
+
+def test_permission_denied_denylist_fails_without_printing_the_path(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses file permissions")
+    path = write_denylist(tmp_path, VALID, "alphaterm-noperm.yaml")
+    path.chmod(0o000)
+    try:
+        with pytest.raises(DenylistError, match="could not be opened") as exc:
+            load_denylist({"PUBLISHABILITY_TERMS_FILE": str(path)}, REPO_ROOT)
+        assert str(path) not in str(exc.value)
+    finally:
+        path.chmod(0o644)
+
+
+def test_directory_as_denylist_path_fails(tmp_path):
+    d = tmp_path / "alphaterm-dir"
+    d.mkdir()
+    with pytest.raises(DenylistError, match="not a regular file") as exc:
+        load_denylist({"PUBLISHABILITY_TERMS_FILE": str(d)}, REPO_ROOT)
+    assert str(d) not in str(exc.value)

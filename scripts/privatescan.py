@@ -174,6 +174,12 @@ def _open_no_symlink(path: Path) -> int:
     traverse a symlink for the final path component, race-free by
     construction) together with fstat on the descriptor that call actually
     returned, never on a stat taken beforehand.
+
+    Linux and macOS both define os.O_NOFOLLOW, but on a platform that does
+    not, `getattr(os, "O_NOFOLLOW", 0)` silently falls back to plain
+    O_RDONLY and the open no longer refuses a symlink at the kernel level;
+    the race-closing guarantee this function exists for is weaker there,
+    resting only on the earlier lstat.
     """
     try:
         lst = path.lstat()
