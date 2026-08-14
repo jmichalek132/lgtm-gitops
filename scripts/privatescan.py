@@ -10,6 +10,7 @@ import base64
 import os
 import re
 import stat
+import subprocess
 import unicodedata
 from pathlib import Path
 from typing import Iterator, Mapping
@@ -385,3 +386,181 @@ def load_denylist(env: Mapping[str, str], repo_root: Path) -> list[dict]:
         seen_ids.add(tid)
         seen_norm.add(normalised)
     return terms
+
+
+REPO_MARKER = "<repository>"
+REDACTED_PATH = "<redacted-path>"
+
+
+def _escape_path(path: str) -> str:
+    """Render a path safe to print. A filename can contain control
+    characters, and an unescaped one can rewrite the diagnostic that reports
+    it. Duplicated from scripts/rulecheck.py's escape_path rather than
+    imported: that module imports iter_scannable_files from this one at
+    module level, and this is small enough that pulling the reverse
+    dependency in just for it is not worth the coupling."""
+    return path.encode("unicode_escape").decode("ascii")
+
+
+def _safe_error_detail(exc: BaseException) -> str:
+    """A short description of exc that is safe to print as-is.
+
+    Never exc's own str(): a CalledProcessError's default message embeds its
+    full argv, which here always includes the repository root path
+    (`_git_paths` passes it to `-C`), and a bare OSError's embeds the
+    filename it failed on. Either can defeat every redaction and escaping
+    this module does elsewhere, since neither the repository root nor a
+    resolve-time OSError's filename ever goes through the path-checking
+    scan_repository otherwise applies to every candidate before printing it.
+    """
+    if isinstance(exc, subprocess.CalledProcessError):
+        return f"exit status {exc.returncode}"
+    strerror = getattr(exc, "strerror", None)
+    return strerror or type(exc).__name__
+
+
+def _git_paths(root: Path, *args: str) -> list[str]:
+    """Run a git ls-files variant and CHECK ITS EXIT STATUS. An unchecked
+    subprocess that returns empty is a scan of zero files reported as
+    clean."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", *args],
+        capture_output=True,
+        check=True,
+    )
+    return [p for p in result.stdout.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
+    """Yield (path, text) for every file both gates should read.
+
+    `text` is either the file's decoded UTF-8 content, or an already
+    formatted finding string of the form "{path}: ..." that a caller appends
+    directly as-is: every discovery, filesystem or decoding problem becomes a
+    finding here, never a silent skip and never an uncaught exception. This
+    is the single discovery primitive shared by Gate 1
+    (scripts/rulecheck.py's check_publishability) and Gate 2
+    (scan_repository below); check_publishability tells a discovery finding
+    from real content with `text.startswith(f"{path}:")`, never isinstance
+    (both are always str), so every finding string produced here must start
+    with exactly that prefix.
+
+    Every discovered path is accounted for and none is read from twice
+    under a false name: a duplicate report from discovery, and a path that
+    resolves outside the repository root, are findings in their own right,
+    not silently deduplicated or silently followed.
+    """
+    try:
+        root_resolved = root.resolve()
+    except OSError as exc:
+        detail = _safe_error_detail(exc)
+        yield REPO_MARKER, f"{REPO_MARKER}: repository root could not be resolved ({detail})"
+        return
+
+    try:
+        paths = _git_paths(root, "--cached") + _git_paths(root, "--others", "--exclude-standard")
+    except (subprocess.CalledProcessError, OSError) as exc:
+        detail = _safe_error_detail(exc)
+        yield REPO_MARKER, (
+            f"{REPO_MARKER}: file discovery failed, so nothing was scanned ({detail})"
+        )
+        return
+
+    seen: set[str] = set()
+    for rel in sorted(paths):
+        if rel in seen:
+            yield rel, f"{rel}: duplicate path returned by discovery"
+            continue
+        seen.add(rel)
+
+        full = root / rel
+        try:
+            resolved = full.resolve()
+        except OSError as exc:
+            yield rel, f"{rel}: path could not be resolved ({_safe_error_detail(exc)})"
+            continue
+
+        # Checked before the escape test, not after: every symlink is
+        # rejected regardless of where it points, so one pointing outside
+        # root is reported as a symlink, the more specific and more useful
+        # diagnostic, rather than as an escape. A non-symlink leaf sitting
+        # inside a symlinked ANCESTOR directory still reaches the escape
+        # check below, since is_symlink() here only inspects the leaf.
+        if full.is_symlink():
+            yield rel, f"{rel}: symlink, which is not scannable and not allowed"
+            continue
+
+        if resolved != root_resolved and root_resolved not in resolved.parents:
+            yield rel, f"{rel}: path escapes the repository root"
+            continue
+
+        # "discovered but missing" (git listed it, it is gone by read time)
+        # and "gitlink or non-regular file" (it exists but is not a regular
+        # file: a gitlink, a FIFO, a device) are different problems and are
+        # reported as two separate findings rather than folded into one.
+        if not full.exists():
+            yield rel, f"{rel}: discovered but missing"
+            continue
+        if not full.is_file():
+            yield rel, f"{rel}: gitlink or non-regular file, which is not allowed"
+            continue
+
+        try:
+            data = full.read_bytes()
+        except OSError as exc:
+            yield rel, f"{rel}: unreadable ({_safe_error_detail(exc)})"
+            continue
+
+        if b"\x00" in data:
+            yield rel, f"{rel}: contains a NUL byte, so it is binary and is rejected"
+            continue
+
+        try:
+            yield rel, data.decode("utf-8")
+        except UnicodeDecodeError:
+            yield rel, f"{rel}: not valid UTF-8"
+
+
+def scan_repository(root: Path, terms: list[dict]) -> list[str]:
+    """Scan every discovered file's content, and every discovered path, for
+    every term.
+
+    Before any path is printed, in a term finding or in a discovery finding,
+    it is checked against the complete matching algorithm: if it matches any
+    term, the whole path is replaced by REDACTED_PATH so the finding meant to
+    report a term does not itself disclose one. A non-matching path is still
+    escaped before printing, so a control character in a filename cannot
+    rewrite the finding that names it.
+
+    This stops direct emission of a matching path's characters. It does NOT
+    stop inference from the existence, count, order or grouping of findings
+    when the rest of the tree is otherwise known: a two-file tree with one
+    named finding and one REDACTED_PATH finding identifies the second file by
+    elimination. That is why every finding this returns, not only the ones
+    that look redacted, is confidential.
+
+    find_term is called at most once per (file, term) for the path and once
+    per (file, term) for the content. The per-term path findings and the
+    redaction decision share that single pass over the path rather than
+    matching it twice, which would double the path-matching share of a scan
+    whose content-matching cost already runs to seconds per term.
+    """
+    normalised = [(t["id"], normalise(t["value"])) for t in terms]
+
+    findings: list[str] = []
+    for path, payload in iter_scannable_files(root):
+        path_hits = [(term_id, find_term(path, needle)) for term_id, needle in normalised]
+        safe = REDACTED_PATH if any(hit is not None for _, hit in path_hits) else _escape_path(path)
+
+        if payload.startswith(f"{path}:"):
+            findings.append(payload.replace(path, safe, 1))
+            continue
+
+        for term_id, hit in path_hits:
+            if hit is not None:
+                findings.append(f"{safe}: {term_id} (path, view={hit[0]}, mask={hit[1]})")
+        for term_id, needle in normalised:
+            hit = find_term(payload, needle)
+            if hit is not None:
+                findings.append(f"{safe}: {term_id} (view={hit[0]}, mask={hit[1]})")
+    return findings

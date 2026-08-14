@@ -25,6 +25,16 @@ from pathlib import Path
 
 import yaml
 
+# Make `scripts.privatescan` importable when this file is run directly, e.g.
+# `python3 scripts/rulecheck.py .`, and not only via pytest. A direct script
+# invocation puts this file's own directory (scripts/) on sys.path[0], not
+# the repository root, so the absolute `scripts.privatescan` import below
+# would otherwise raise ModuleNotFoundError outside a test run, where the
+# root is already on sys.path some other way.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.privatescan import iter_scannable_files
+
 PUBLISHABILITY_FILE = "publishability.yaml"
 PUBLISHABILITY_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 PUBLISHABILITY_MAX_REGEX = 512
@@ -209,85 +219,6 @@ def scan_text_with_patterns(
     return findings
 
 
-def _git_scannable_paths(root: Path) -> list[str] | None:
-    """Every path `git ls-files` reports as tracked, or as untracked but not
-    ignored. None, never [], on failure: an empty list here must not be
-    mistaken by the caller for a repository that legitimately has nothing to
-    scan."""
-    try:
-        tracked = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "-z", "--cached"],
-            capture_output=True, check=True,
-        )
-        untracked = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "-z", "--others", "--exclude-standard"],
-            capture_output=True, check=True,
-        )
-    except (subprocess.CalledProcessError, OSError):
-        return None
-    raw = tracked.stdout + b"\0" + untracked.stdout
-    return [p for p in raw.decode("utf-8", "surrogateescape").split("\0") if p]
-
-
-def iter_scannable_files(root: Path):
-    """Yield (path, text) for every file Gate 1 should read.
-
-    TEMPORARY: this is Task 4's minimal stand-in, not the shared
-    implementation. The real `iter_scannable_files` ships in Task 8
-    (scripts/privatescan.py, also consumed by Gate 2; see
-    docs/superpowers/plans/2026-08-14-publishability-gates.md) and this
-    function must be deleted outright, not extended, when that lands.
-
-    It exists only because registering "publishability" in CHECKS (this
-    task) makes `check_publishability` call this name the moment the check
-    actually runs. Leaving the name undefined does not make the check
-    inert: it makes `scripts/rulecheck.py` raise an uncaught NameError,
-    which is worse than a finding, and returning an empty scan here without
-    reading anything would make a check that cannot run indistinguishable
-    from one that ran and found nothing clean, exactly the failure mode
-    this repository exists to prevent. So this reads real tracked and
-    untracked-but-not-ignored files with `git ls-files` and actually scans
-    their content, and every problem path (discovery failure, symlink,
-    unreadable, binary, non-UTF-8) is yielded as an already-formatted
-    finding via the "{path}: ..." prefix convention `check_publishability`
-    matches on, rather than silently dropped.
-
-    Known gaps Task 8's real implementation must still cover, left out here
-    deliberately to keep this stand-in small: duplicate-path detection as
-    its own finding (this walks `sorted(set(paths))`, so a duplicate just
-    collapses silently instead of being reported); path-escape detection
-    for a path that resolves outside `root`; distinguishing "discovered but
-    missing" (the path was listed by git but is gone by the time this
-    reads it) from "gitlink or non-regular file" as two separate findings,
-    rather than the single silent `continue` this uses for anything that
-    is not a regular file; and reporting `OSError.strerror` specifically
-    in the unreadable-file finding rather than the whole exception object.
-    """
-    paths = _git_scannable_paths(root)
-    if paths is None:
-        yield "<repository>", "<repository>: file discovery failed, so nothing was scanned (git ls-files did not run)"
-        return
-    for rel in sorted(set(paths)):
-        full = root / rel
-        if full.is_symlink():
-            yield rel, f"{rel}: symlink, which is not scannable and not allowed"
-            continue
-        if not full.is_file():
-            continue
-        try:
-            data = full.read_bytes()
-        except OSError as exc:
-            yield rel, f"{rel}: unreadable ({exc})"
-            continue
-        if b"\x00" in data:
-            yield rel, f"{rel}: contains a NUL byte, so it is binary and is skipped"
-            continue
-        try:
-            yield rel, data.decode("utf-8")
-        except UnicodeDecodeError:
-            yield rel, f"{rel}: not valid UTF-8, skipped"
-
-
 def check_publishability(root: Path) -> list[str]:
     try:
         patterns = load_publishability_config(root)
@@ -296,7 +227,15 @@ def check_publishability(root: Path) -> list[str]:
     findings: list[str] = []
     for path, text in iter_scannable_files(root):
         if text.startswith(f"{path}:"):
-            findings.append(text)  # a discovery finding, already formatted
+            # A discovery finding, already formatted by iter_scannable_files
+            # using the raw, unescaped path (that is what keeps the prefix
+            # check above working). Escape it here, before the finding is
+            # ever returned, for the same reason scan_text_with_patterns
+            # already does for a content match: an unescaped control
+            # character in a filename could otherwise rewrite the
+            # diagnostic that reports it.
+            safe = escape_path(path)
+            findings.append(text.replace(path, safe, 1))
         else:
             active = [p for p in patterns if not p.get("_disabled")]
             findings.extend(scan_text_with_patterns(path, text, active))

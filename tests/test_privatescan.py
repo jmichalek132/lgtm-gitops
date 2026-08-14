@@ -1,6 +1,7 @@
 import base64
 import os
 import stat as stdlib_stat
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -9,13 +10,16 @@ import pytest
 import scripts.privatescan as privatescan
 from scripts.privatescan import (
     DENYLIST_PLACEHOLDER,
+    REDACTED_PATH,
     DenylistError,
     apply_mask,
     candidate_views,
     eligible_masks,
     find_term,
+    iter_scannable_files,
     load_denylist,
     normalise,
+    scan_repository,
 )
 
 TERM = "zephyrgate"  # synthetic. Never use a real private term in a test.
@@ -531,3 +535,251 @@ def test_directory_as_denylist_path_fails(tmp_path):
     with pytest.raises(DenylistError, match="not a regular file") as exc:
         load_denylist({"PUBLISHABILITY_TERMS_FILE": str(d)}, REPO_ROOT)
     assert str(d) not in str(exc.value)
+
+
+# Task 8: file discovery, path scanning and path redaction.
+#
+# iter_scannable_files is the shared discovery primitive: Gate 1
+# (scripts/rulecheck.py's check_publishability) and Gate 2 (scan_repository
+# below) both consume it. The "{path}: ..." prefix convention it produces on
+# a problem path is what check_publishability uses to tell a discovery
+# finding from real file content (text.startswith(f"{path}:"), never
+# isinstance: both are str, and that was a live defect earlier in this plan
+# where the isinstance branch never fired and every discovery error was
+# silently pattern-matched as content).
+#
+# Two of the plan's own Step-3 tests are adapted here rather than copied
+# verbatim. The originals filtered with `if isinstance(f, str)`, which is
+# always true given the interface contract (a problem path never yields
+# anything but a str), so the filter was vacuous; it is dropped below so the
+# assertion tests the actual behaviour instead of a condition that can never
+# be false.
+
+
+def _git_repo(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    return tmp_path
+
+
+def test_discovery_failure_is_a_finding_not_an_empty_scan(tmp_path, monkeypatch):
+    """An unchecked git ls-files returning empty is a scanner that passes by
+    scanning zero files."""
+
+    def boom(*args, **kwargs):
+        raise subprocess.CalledProcessError(2, "git")
+
+    monkeypatch.setattr(privatescan.subprocess, "run", boom)
+    findings = scan_repository(tmp_path, [{"id": "private-term-01", "value": "x"}])
+    assert findings and "discovery" in findings[0]
+
+
+def test_discovery_failure_does_not_leak_the_repository_root_path(tmp_path):
+    """A real (unmocked) `git ls-files` failure raises CalledProcessError,
+    and that exception's own str() embeds its full argv, which always
+    includes the repository root path (`_git_paths` passes it to `-C`). The
+    finding for this failure is keyed to REPO_MARKER, not to the root path,
+    so scan_repository's per-candidate redaction never inspects the root
+    path at all: if the exception's raw text leaked into the finding
+    verbatim, a term embedded in the repository's own checkout path would
+    reach the output regardless of what any file in the tree contains.
+    Confirmed against the unmocked path: a real, not simulated, discovery
+    failure (this directory is never git-initialised)."""
+    repo = tmp_path / "zephyrgate-checkout"
+    repo.mkdir()
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": "zephyrgate"}])
+    assert findings
+    for finding in findings:
+        assert "zephyrgate" not in finding
+
+
+def test_nul_byte_is_a_finding_not_a_skip(tmp_path):
+    repo = _git_repo(tmp_path)
+    (repo / "blob.bin").write_bytes(b"harmless\x00content")
+    findings = list(iter_scannable_files(repo))
+    assert any("NUL" in text for _, text in findings)
+
+
+def test_symlink_is_a_finding(tmp_path):
+    repo = _git_repo(tmp_path)
+    (repo / "real.txt").write_text("hello", encoding="utf-8")
+    (repo / "link.txt").symlink_to(repo / "real.txt")
+    findings = list(iter_scannable_files(repo))
+    assert any("symlink" in text for _, text in findings)
+
+
+def test_untracked_non_ignored_file_is_scanned(tmp_path):
+    repo = _git_repo(tmp_path)
+    (repo / "new.txt").write_text("zephyrgate", encoding="utf-8")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": "zephyrgate"}])
+    assert any("new.txt" in f for f in findings)
+
+
+def test_ignored_file_is_not_scanned(tmp_path):
+    repo = _git_repo(tmp_path)
+    (repo / ".gitignore").write_text("secret.txt\n", encoding="utf-8")
+    (repo / "secret.txt").write_text("zephyrgate", encoding="utf-8")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": "zephyrgate"}])
+    assert not any("secret.txt" in f for f in findings)
+
+
+def test_term_in_a_path_name_is_found(tmp_path):
+    repo = _git_repo(tmp_path)
+    (repo / "zephyrgate-notes.txt").write_text("clean", encoding="utf-8")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": "zephyrgate"}])
+    assert findings
+
+
+def test_matching_path_is_redacted_in_every_finding(tmp_path):
+    repo = _git_repo(tmp_path)
+    (repo / "zephyrgate-notes.txt").write_text("zephyrgate", encoding="utf-8")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": "zephyrgate"}])
+    assert findings
+    for finding in findings:
+        assert "zephyrgate" not in finding
+        assert REDACTED_PATH in finding
+
+
+def test_findings_never_contain_the_term(tmp_path):
+    repo = _git_repo(tmp_path)
+    (repo / "clean-name.txt").write_text("a zephyrgate b", encoding="utf-8")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": "zephyrgate"}])
+    assert findings
+    for finding in findings:
+        assert "zephyrgate" not in finding
+        assert "private-term-01" in finding
+
+
+# Beyond the plan's Step-1 tests: four gaps an earlier review found in the
+# Task 4 stand-in, which this task's implementation must close.
+
+
+def test_duplicate_path_is_reported_not_silently_collapsed(tmp_path, monkeypatch):
+    """The Task 4 stand-in walked sorted(set(paths)), so a path discovery
+    returned twice just vanished into one entry with no trace. A double
+    report (from git, or a future caller bug) must surface as its own
+    finding instead of disappearing into an ordinary scan."""
+    repo = _git_repo(tmp_path)
+    (repo / "dup.txt").write_text("clean", encoding="utf-8")
+
+    def fake_git_paths(root, *args):
+        return ["dup.txt"]
+
+    monkeypatch.setattr(privatescan, "_git_paths", fake_git_paths)
+    texts = [text for _, text in iter_scannable_files(repo)]
+    assert sum("duplicate" in t for t in texts) == 1
+
+
+def test_path_escaping_the_repository_root_is_a_finding(tmp_path, monkeypatch):
+    """A path discovery reports that resolves outside the repository root (a
+    literal `..` component, or in practice a symlinked ancestor directory)
+    must be a finding rather than silently read from wherever it actually
+    points."""
+    repo = _git_repo(tmp_path)
+
+    def fake_git_paths(root, *args):
+        return ["../escape.txt"] if args and args[0] == "--cached" else []
+
+    monkeypatch.setattr(privatescan, "_git_paths", fake_git_paths)
+    findings = list(iter_scannable_files(repo))
+    assert any("escapes" in text for _, text in findings)
+
+
+def test_discovered_but_missing_is_distinct_from_non_regular_file(tmp_path):
+    """A path git reports that is gone by read time (staged, then deleted
+    from the working tree without `git rm`) is a different problem from a
+    path that exists but is not a regular file, and must not share a
+    message with it."""
+    repo = _git_repo(tmp_path)
+    (repo / "gone.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "gone.txt"], check=True)
+    (repo / "gone.txt").unlink()
+
+    findings = dict(iter_scannable_files(repo))
+    assert "missing" in findings["gone.txt"]
+    assert "non-regular" not in findings["gone.txt"]
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs on this platform")
+def test_non_regular_file_is_distinct_from_missing(tmp_path, monkeypatch):
+    """A FIFO exists on disk but is neither a symlink nor a regular file:
+    the 'gitlink or non-regular file' branch, not 'discovered but missing'.
+
+    `git ls-files --others` itself never reports a FIFO (verified: git
+    silently omits non-regular, non-symlink dirents from untracked-file
+    discovery), so this cannot be reached by creating one loose in a real
+    repository the way the symlink and NUL-byte cases can. A real gitlink
+    (a submodule reference) hits the same branch but needs a second
+    repository and remote to construct. Discovery is faked instead, the
+    same technique used for the duplicate-path and path-escape tests above,
+    so the filesystem-facing branch itself is exercised directly."""
+    repo = _git_repo(tmp_path)
+    os.mkfifo(repo / "pipe")
+
+    def fake_git_paths(root, *args):
+        return ["pipe"] if args and args[0] == "--cached" else []
+
+    monkeypatch.setattr(privatescan, "_git_paths", fake_git_paths)
+    findings = dict(iter_scannable_files(repo))
+    assert "non-regular" in findings["pipe"]
+    assert "missing" not in findings["pipe"]
+
+
+def test_unreadable_file_message_uses_strerror_not_the_exception_repr(tmp_path):
+    """The unreadable-file finding must report OSError.strerror ('Permission
+    denied'), a stable, non-secret-shaped OS message, rather than the whole
+    exception object, whose repr includes the offending path a second time
+    and, on some platforms, other incidental detail."""
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses file permissions")
+    repo = _git_repo(tmp_path)
+    path = repo / "noperm.txt"
+    path.write_text("x", encoding="utf-8")
+    path.chmod(0o000)
+    try:
+        findings = dict(iter_scannable_files(repo))
+        text = findings["noperm.txt"]
+        assert "Permission denied" in text
+        assert "PermissionError" not in text
+    finally:
+        path.chmod(0o644)
+
+
+def test_path_matching_is_not_repeated_per_term(tmp_path, monkeypatch):
+    """Performance guard: find_term is called per file and per term, and a
+    whole-repository scan costs seconds per term. The redaction decision and
+    the per-term path finding must share a single pass over
+    find_term(path, ...): computing it once for redaction and again inside
+    the per-term reporting loop would double the cost of exactly the part
+    Task 8 was told not to duplicate. One clean file, two terms: find_term
+    must be called on the path exactly twice, not four times."""
+    repo = _git_repo(tmp_path)
+    (repo / "clean.txt").write_text("clean", encoding="utf-8")
+
+    calls: list[str] = []
+    real_find_term = privatescan.find_term
+
+    def counting_find_term(text, needle):
+        calls.append(text)
+        return real_find_term(text, needle)
+
+    monkeypatch.setattr(privatescan, "find_term", counting_find_term)
+    terms = [
+        {"id": "private-term-01", "value": "zephyrgate"},
+        {"id": "private-term-02", "value": "unrelatedword"},
+    ]
+    scan_repository(repo, terms)
+    path_calls = [c for c in calls if c == "clean.txt"]
+    assert len(path_calls) == len(terms)
+
+
+def test_scan_repository_whole_repo_completes_quickly():
+    """Whole-repository scan cost, recorded for the task report: 41 tracked
+    files, one term, must stay well inside a sane budget rather than
+    regressing toward the 137s/file quadratic blowup Task 6 measured and
+    fixed for find_term itself."""
+    import time
+
+    start = time.perf_counter()
+    scan_repository(REPO_ROOT, [{"id": "private-term-01", "value": "zephyrgate"}])
+    elapsed = time.perf_counter() - start
+    assert elapsed < 15.0

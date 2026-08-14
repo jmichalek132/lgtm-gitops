@@ -253,3 +253,27 @@ def test_discovery_failure_is_a_finding_not_an_empty_pass(tmp_path):
     write_config(tmp_path, "version: 1\npatterns: [{id: a, regex: x, message: y}]\n")
     findings = check_publishability(tmp_path)  # not a git repo: ls-files fails
     assert findings and "discovery failed" in findings[0]
+
+
+def test_discovery_finding_path_is_escaped(tmp_path):
+    """iter_scannable_files formats a discovery finding with the raw,
+    unescaped path (by convention, so text.startswith(f"{path}:") keeps
+    working). check_publishability is responsible for escaping it before the
+    finding is ever returned, the same way scan_text_with_patterns already
+    does for an ordinary content match: a control character in a filename
+    must not be able to rewrite the diagnostic that names it."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    write_config(tmp_path, "version: 1\npatterns: [{id: a, regex: x, message: y}]\n")
+    target = tmp_path / "target.txt"
+    target.write_text("hello", encoding="utf-8")
+    bad_name = "bad\rname.txt"
+    (tmp_path / bad_name).symlink_to(target)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+
+    findings = check_publishability(tmp_path)
+    joined = "\n".join(findings)
+    assert "symlink" in joined
+    assert "\r" not in joined
+    assert "\\r" in joined
