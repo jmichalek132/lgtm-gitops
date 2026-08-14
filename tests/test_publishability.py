@@ -343,11 +343,18 @@ def test_discovery_failure_is_a_finding_not_an_empty_pass(tmp_path):
 
 def test_discovery_finding_path_is_escaped(tmp_path):
     """iter_scannable_files formats a discovery finding with the raw,
-    unescaped path (by convention, so text.startswith(f"{path}:") keeps
-    working). check_publishability is responsible for escaping it before the
-    finding is ever returned, the same way scan_text_with_patterns already
-    does for an ordinary content match: a control character in a filename
-    must not be able to rewrite the diagnostic that names it."""
+    unescaped path, embedded in the message text so that
+    `payload.replace(path, safe, 1)` can find and redact it later.
+    check_publishability is responsible for escaping it before the finding is
+    ever returned, the same way scan_text_with_patterns already does for an
+    ordinary content match: a control character in a filename must not be able
+    to rewrite the diagnostic that names it.
+
+    The raw path is NOT there to support a text-prefix discriminator. That
+    mechanism, `text.startswith(f"{path}:")`, was removed because file content
+    controls it; the discriminator is `isinstance(text, DiscoveryFinding)`.
+    Anyone reading this test while refactoring should not conclude otherwise:
+    a content-based check here has already failed twice."""
     import subprocess
 
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
