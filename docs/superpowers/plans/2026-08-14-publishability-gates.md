@@ -533,10 +533,10 @@ def check_publishability(root: Path) -> list[str]:
     return findings
 ```
 
-`iter_scannable_files` is delivered by Task 6 and shared with Gate 2. Until then, this task's tests exercise `scan_text_with_patterns` directly, and `test_gate1_passes_on_the_real_repository` is expected to fail until Task 6 lands. Mark it:
+`iter_scannable_files` is delivered by Task 8 and shared with Gate 2. Until then, this task's tests exercise `scan_text_with_patterns` directly, and `test_gate1_passes_on_the_real_repository` is expected to fail until Task 8 lands. Mark it:
 
 ```python
-@pytest.mark.xfail(reason="iter_scannable_files arrives in Task 6", strict=True)
+@pytest.mark.xfail(reason="iter_scannable_files arrives in Task 8", strict=True)
 def test_gate1_passes_on_the_real_repository():
     assert check_publishability(REPO_ROOT) == []
 ```
