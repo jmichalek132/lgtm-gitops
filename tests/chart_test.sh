@@ -23,9 +23,12 @@ assert_contains "$OUT" "ObservabilityRulesMimirDeadman" "rule body is embedded"
 # Counting ConfigMaps across the WHOLE render asserted that this repository
 # contains exactly one mimir rule file, so the first team to add a second alert
 # broke the build, which is the repository's entire reason to exist. What the
-# assertion is for is that one rule file yields one ConfigMap, so count that.
+# assertion is for is that one rule file yields one ConfigMap, so name each one
+# instead of counting the render as a whole.
 assert_count "$OUT" "name: platform-platform-mimir-deadman-alerts" 1 \
-  "deadman rule renders exactly one ConfigMap"
+  "platform deadman rule renders exactly one ConfigMap"
+assert_count "$OUT" "name: platform-payments-mimir-checkout-alerts" 1 \
+  "payments checkout rule renders exactly one ConfigMap"
 
 echo "chart: fail-closed guards"
 

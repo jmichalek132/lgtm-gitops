@@ -1,0 +1,18 @@
+{
+  "uid": "payments-checkout-ov",
+  "title": "Observability Rules: Payments Checkout Overview",
+  "tags": ["observability-rules", "payments"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "type": "text",
+      "title": "Purpose",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0},
+      "options": {
+        "mode": "markdown",
+        "content": "If this dashboard is present in Grafana, the Git Sync delivery path from the observability-rules repository is working for the payments team's checkout rules. Its absence is the signal."
+      }
+    }
+  ]
+}
