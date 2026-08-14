@@ -222,6 +222,7 @@ tests:
 
 
 def test_fixtures_accepts_a_fixture_that_tests_something(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
     write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", FIXTURE)
     assert rulecheck.check_fixtures(tmp_path) == []
 
@@ -262,6 +263,31 @@ def test_fixtures_requires_rule_files(tmp_path):
           "rule_files: []\n\ntests:\n  - interval: 1m\n")
     findings = rulecheck.check_fixtures(tmp_path)
     assert any("rule_files" in f for f in findings)
+
+
+def test_fixtures_rejects_a_rule_files_entry_that_does_not_exist(tmp_path):
+    # The rule file the fixture claims to exercise was deleted; the fixture
+    # itself is still well-formed (non-empty 'tests', non-empty 'rule_files'),
+    # so this is the only thing left that can catch the orphan.
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", FIXTURE)
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert any("a-alerts.yaml" in f and "does not exist" in f for f in findings)
+
+
+def test_fixtures_resolves_rule_files_relative_to_the_fixture_directory(tmp_path):
+    # promtool resolves rule_files relative to the fixture's own directory
+    # (scripts/check.sh: `cd "$(dirname "$f")"`), not the repository root, so
+    # a same-named file elsewhere in the tree must not satisfy the check.
+    write(tmp_path, "rules/platform/mimir/a-alerts.yaml")
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", FIXTURE)
+    findings = rulecheck.check_fixtures(tmp_path)
+    assert any("a-alerts.yaml" in f and "does not exist" in f for f in findings)
+
+
+def test_fixtures_accepts_a_rule_files_entry_that_exists(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    write(tmp_path, "rules/payments/mimir/a-alerts-tests.yaml", FIXTURE)
+    assert rulecheck.check_fixtures(tmp_path) == []
 
 
 def test_fixtures_reports_unparseable_yaml(tmp_path):
@@ -472,6 +498,44 @@ def test_codeowners_flags_an_entry_with_no_folder(tmp_path):
     )
     findings = rulecheck.check_codeowners(tmp_path)
     assert any("ghost" in f for f in findings)
+
+
+def test_codeowners_flags_a_dashboards_folder_missing_while_rules_remains(tmp_path):
+    # The team's dashboards folder was deleted (or never created) while its
+    # rules folder is real, and CODEOWNERS still names both. The per-path
+    # probe loop further down stays silent on this: with no real files under
+    # dashboards/payments/, its only evidence is a synthetic probe plus
+    # CODEOWNERS's own entry, which "resolves" that probe to exactly the team
+    # the entry names, so nothing looks wrong from that angle. Comparing real
+    # folders against real entries, per parent, is what catches a directory
+    # that used to have content and no longer does.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml")
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(
+        CODEOWNERS_HEADER
+        + "/rules/payments/ @org/payments\n/dashboards/payments/ @org/payments\n"
+    )
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any(
+        "payments" in f and "dashboards/payments" in f and "no" in f.lower()
+        for f in findings
+    )
+
+
+def test_codeowners_flags_a_rules_folder_missing_while_dashboards_remains(tmp_path):
+    # Mirror of the case above: the rules folder is gone, the dashboards
+    # folder is real, CODEOWNERS still names both.
+    write(tmp_path, "dashboards/payments/overview.json", "{}")
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(
+        CODEOWNERS_HEADER
+        + "/rules/payments/ @org/payments\n/dashboards/payments/ @org/payments\n"
+    )
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any(
+        "payments" in f and "rules/payments" in f and "no" in f.lower()
+        for f in findings
+    )
 
 
 def test_codeowners_requires_platform_owned_paths(tmp_path):

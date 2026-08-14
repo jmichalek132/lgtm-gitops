@@ -537,6 +537,29 @@ def check_fixtures(root: Path) -> list[str]:
                 f"{rel}: 'rule_files' is missing or empty, so this fixture exercises "
                 f"no rule file in this repository"
             )
+            continue
+
+        # promtool resolves rule_files relative to the fixture's own directory
+        # (scripts/check.sh runs `cd "$(dirname "$f")" && promtool test rules`),
+        # so that is exactly what has to be checked here. Without this, deleting
+        # the rule file and leaving the fixture behind satisfies both checks
+        # above (tests is non-empty, rule_files is non-empty) and every other
+        # check in this file skips *-tests.yaml files outright, so the orphaned
+        # fixture is invisible: exactly the stale fixture this file exists to
+        # catch, just pointed at a rule file that no longer exists at all.
+        for entry in rule_files_key:
+            if not isinstance(entry, str) or not entry:
+                findings.append(
+                    f"{rel}: 'rule_files' entry {entry!r} is not a usable relative path"
+                )
+                continue
+            if not (path.parent / entry).is_file():
+                findings.append(
+                    f"{rel}: 'rule_files' names '{entry}', which does not exist relative "
+                    f"to this fixture's own directory. promtool would fail to load it, "
+                    f"and this is exactly what an orphaned fixture looks like once its "
+                    f"rule file has been deleted."
+                )
 
     return findings
 
@@ -798,13 +821,51 @@ def ownership_warnings(root: Path) -> list[str]:
     ]
 
 
-def team_folders(root: Path) -> set[str]:
-    teams: set[str] = set()
-    for parent in ("rules", "dashboards"):
-        base = root / parent
-        if base.is_dir():
-            teams |= {d.name for d in base.iterdir() if d.is_dir()}
-    return teams
+# The two governed parents a team can own folders and CODEOWNERS patterns under.
+# Kept as one constant so every place that needs "both parents" iterates the
+# same pair in the same order.
+TEAM_PARENTS = ("rules", "dashboards")
+
+
+def team_folders_by_parent(root: Path) -> dict[str, set[str]]:
+    """Team names with a real directory under EACH parent, kept separate.
+
+    Merging rules/ and dashboards/ into one set (an earlier version of this
+    function did exactly that) is what lets a whole governed directory
+    disappear unnoticed: if a team still has a folder under either parent,
+    the merged set still contains that team's name, so nothing downstream can
+    tell that the OTHER parent's folder is gone. Keeping the two sets apart
+    is what makes that visible.
+    """
+    return {
+        parent: (
+            {d.name for d in (root / parent).iterdir() if d.is_dir()}
+            if (root / parent).is_dir() else set()
+        )
+        for parent in TEAM_PARENTS
+    }
+
+
+def codeowners_teams_by_parent(
+    entries: list[tuple[str, list[str]]]
+) -> dict[str, set[str]]:
+    """Team names CODEOWNERS claims under EACH parent, kept separate.
+
+    Mirrors team_folders_by_parent: codeowners_entries() below returns the
+    same information merged across both parents, which is right for its own
+    callers (check_ownership just needs "every stale handle", regardless of
+    which parent named it) but wrong for reconciling folders against entries
+    per parent, which is what this exists for.
+    """
+    owned: dict[str, set[str]] = {parent: set() for parent in TEAM_PARENTS}
+    for pattern, _owners in entries:
+        for parent in TEAM_PARENTS:
+            prefix = f"/{parent}/"
+            if pattern.startswith(prefix):
+                remainder = pattern[len(prefix):].strip("/")
+                if remainder:
+                    owned[parent].add(remainder.split("/")[0])
+    return owned
 
 
 def codeowners_entries(root: Path) -> tuple[set[str], list[tuple[str, list[str]]]]:
@@ -983,19 +1044,35 @@ def check_codeowners(root: Path) -> list[str]:
     # be checked against that one, not against the shipped placeholder.
     org, _configured, _errors = load_ownership(root)
     owned_teams, entries = codeowners_entries(root)
-    actual_teams = team_folders(root)
 
-    for team in sorted(actual_teams - owned_teams):
-        findings.append(
-            f"team '{team}' has folders but no CODEOWNERS entry; "
-            f"add '/rules/{team}/ {team_owner(team, org)}' and "
-            f"'/dashboards/{team}/ {team_owner(team, org)}'"
-        )
+    # Reconciled per parent, not merged: a team keeping its rules/<team>/
+    # folder while its dashboards/<team>/ folder is deleted (or the reverse)
+    # must not hide behind the other parent still being real. The per-team,
+    # per-path probe loop further down also checks rules/dashboards
+    # reconciliation, but it probes CODEOWNERS's OWN patterns for evidence,
+    # including a synthetic probe for a directory that does not exist yet, on
+    # the theory that a not-yet-created path is still evidence (see
+    # governed_probe_paths and codeowners_pattern_witness). That theory is
+    # right for staging a new team's ownership ahead of its first file, and
+    # wrong for a directory that used to have real content and no longer
+    # does: CODEOWNERS still resolves the synthetic probe "correctly" in
+    # that case, using its own stale entry as the only evidence, and stays
+    # silent. Comparing real folders against real entries, per parent, is
+    # the only thing that catches that deletion.
+    actual_by_parent = team_folders_by_parent(root)
+    owned_by_parent = codeowners_teams_by_parent(entries)
 
-    for team in sorted(owned_teams - actual_teams):
-        findings.append(
-            f"CODEOWNERS claims team '{team}' but no rules/ or dashboards/ folder exists"
-        )
+    for parent in TEAM_PARENTS:
+        for team in sorted(actual_by_parent[parent] - owned_by_parent[parent]):
+            findings.append(
+                f"team '{team}' has a {parent}/ folder but no CODEOWNERS entry; "
+                f"add '/{parent}/{team}/ {team_owner(team, org)}'"
+            )
+        for team in sorted(owned_by_parent[parent] - actual_by_parent[parent]):
+            findings.append(
+                f"CODEOWNERS claims team '{team}' under /{parent}/ but no "
+                f"{parent}/{team}/ folder exists"
+            )
 
     compiled: list[tuple[str, list[str], re.Pattern[str]]] = []
     for pattern, owners in entries:
