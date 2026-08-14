@@ -749,14 +749,24 @@ def test_codeowners_rejects_a_rules_entry_with_no_dashboards_entry(tmp_path):
     governed_repo(tmp_path)
     codeowners(tmp_path, CODEOWNERS_HEADER + "/rules/payments/ @org/payments\n")
     findings = rulecheck.check_codeowners(tmp_path)
-    assert any("dashboards/payments" in f and "@org/payments" in f for f in findings)
+    assert any(
+        "dashboards/payments/overview.json" in f
+        and "@org/platform" in f
+        and "must resolve to @org/payments" in f
+        for f in findings
+    )
 
 
 def test_codeowners_rejects_a_dashboards_entry_with_no_rules_entry(tmp_path):
     governed_repo(tmp_path)
     codeowners(tmp_path, CODEOWNERS_HEADER + "/dashboards/payments/ @org/payments\n")
     findings = rulecheck.check_codeowners(tmp_path)
-    assert any("rules/payments" in f and "@org/payments" in f for f in findings)
+    assert any(
+        "rules/payments/mimir/a-alerts.yaml" in f
+        and "@org/platform" in f
+        and "must resolve to @org/payments" in f
+        for f in findings
+    )
 
 
 def test_codeowners_rejects_a_narrower_pattern_stealing_one_team_file(tmp_path):
