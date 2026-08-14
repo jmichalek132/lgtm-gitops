@@ -29,11 +29,24 @@ ownership you do not have is the one state these checks refuse.
 Ownership rules that follow, all enforced by `make check`:
 
 - a team owns its own `rules/<team>/` **and** its own `dashboards/<team>/`;
-  both entries are required, and the two are one ownership boundary
+  both entries are required, and the two are one ownership boundary, so both
+  folders must contain at least one committed file, because git does not track
+  an empty directory
 - the owning team must be the **sole** owner of them, because on GitHub any
   co-owner can approve alone
 - the paths that govern the checks themselves (`scripts/`, `tests/`, `tools/`,
   `templates/`, `Makefile`, `ownership.yaml`, …) stay with the platform team
+
+Onboarding a new team has a dead end worth knowing about in advance. Add both
+CODEOWNERS entries but create only `rules/<team>/`, and `make check` fails with
+`CODEOWNERS claims team '<team>' under /dashboards/ but no dashboards/<team>/
+folder exists`. Delete the dashboards entry to silence that, and the next check
+fails instead: every path under `dashboards/<team>/` now resolves to the default
+owner, and the finding says it `must resolve to @org/<team>`. Creating an empty
+`dashboards/<team>/` is not a way out either. It passes locally, because the
+check looks at the working tree, and then fails in CI, which only ever sees what
+git tracked. Add the team's first rule **and** its first dashboard in the same
+commit as the two CODEOWNERS entries.
 
 ## Adding an alert
 
