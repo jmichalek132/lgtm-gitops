@@ -481,7 +481,7 @@ by the backends already existing.
 ## 8. Meta-monitoring Prometheus
 
 Alerts about Mimir must not be evaluated by Mimir. The prior system's
-`rules/op/metrics/regional/mimir-alerts.yaml` held 60 rule definitions across 54
+`rules/files/op/metrics/regional/mimir-alerts.yaml` held 60 rule definitions across 54
 unique `Mimir*` alert names, including `MimirIngesterUnhealthy`,
 `MimirRequestErrors`, `MimirFrontendQueriesStuck` and `MimirKVStoreFailure`, all
 evaluated by Mimir's own ruler against Mimir's own storage. Its `prometheus-query`
