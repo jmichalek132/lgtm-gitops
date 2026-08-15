@@ -295,19 +295,23 @@ deterministic false negative in the gate's central mechanism, confirmed by
 execution. The `\U` and `\u` escapes are likewise distinct.
 
 **Measured false-positive cost.** Deleting separators concatenates the whole
-candidate, so a term can match across an original word boundary: over this
-repository's 292k-character corpus, the deletion views expose 105,288 nine-grams
-that do not exist in the source view, against 103,858 that do, roughly doubling
-the surface a term can collide with. `a zephyr gateway` matches the tests'
-synthetic term `zephyrgate` under `{P}` and not in source. The example is
-synthetic on purpose: one constructed from a private term would itself be a
-derivation of it, which the security boundary above forbids. The collision cost
-is accepted deliberately: a false positive blocks and is triaged, whereas a
-false negative publishes. Anchoring deletion-view matches to an original word
-start was measured to remove both observed false positives while preserving
-every evasion catch, and was rejected because it also creates a false negative
-for a term embedded mid-word and separator-split. The consequence for triage is
-real and is why findings must carry the mask that produced them.
+candidate, so a term can match across an original word boundary. Measured at
+`657e3b5`, over the 45 tracked text files that make up a 550,737-character
+corpus, counting distinct nine-grams of each view after the scanner's own
+normalisation: the source view holds 220,826, and the `{P}` view contributes a
+further 187,695 the source view does not, roughly doubling the surface a term
+can collide with. The counts move with the corpus, so the ratio rather than the
+totals is the durable claim, and the pinned commit is what keeps them
+re-derivable. `a zephyr gateway` matches the tests' synthetic term `zephyrgate`
+under `{P}` and not in source. The example is synthetic on purpose: one
+constructed from a private term would itself be a derivation of it, which the
+security boundary above forbids. The collision cost is accepted deliberately: a
+false positive blocks and is triaged, whereas a false negative publishes.
+Anchoring deletion-view matches to an original word start was measured to
+remove both observed false positives while preserving every evasion catch, and
+was rejected because it also creates a false negative for a term embedded
+mid-word and separator-split. The consequence for triage is real and is why
+findings must carry the mask that produced them.
 
 Every content match reports `path: <opaque-id>`, plus the view and the deletion
 mask that produced it. After a valid denylist has loaded, every repository path
