@@ -986,8 +986,10 @@ touch ArgoCD. They can run in parallel with a different pair of hands.
 
 ## Appendix A: evidence
 
-Findings from the archived ***REMOVED*** repositories and from upstream source, each
-of which motivated a decision above.
+Findings from the prior system's archived repositories and from upstream source,
+each of which motivated a decision above. Rows about the prior system state the
+failure mode and the response it produced here; rows about upstream state the
+behaviour this design relies on.
 
 Five rows were wrong in the first draft and were corrected after external review
 re-derived them from the archives. The corrections are noted inline, because a
@@ -995,14 +997,14 @@ spec that cites evidence should show where its evidence was sloppy.
 
 | Finding | Evidence |
 | --- | --- |
-| The `global` rule tier was abandoned, not never used | the current tree holds only `.gitkeep`, but history contains `rules/files/op/metrics/global/alerts.yaml` and a test-team equivalent. **Corrected:** the first draft claimed it was never used across 413 commits |
-| Unit tests were never run | 3 `*-tests.yaml` files exist and no CI job ever invoked a test runner. **Corrected:** two commits did add a `mimirtool` download, so "no reference in CI" was true only of the final state |
-| Test-exclusion bug | template used `contains "tests"`, not a suffix match |
-| Owner allow-list drifted from reality | 18 values hand-maintained in `validation.yaml`, unconnected to folders |
-| Environment selector sprawl | 73 of 79 rule files, **210** matchers in deployable rules, 8 distinct shapes including `!="dev"`. **Corrected:** the first draft said 229, which counted 19 more occurrences inside test fixtures |
-| Tenant hardcoded and unowned | `/tmp/rules/***REMOVED***` in 4 backend values files; 0 tenant commits in the rules repo |
-| Mimir alerts were self-referential | **60** `Mimir*` rule definitions, 54 unique alert names, evaluated by Mimir's own ruler. **Corrected:** the first draft said 10, a number taken from `head`-truncated grep output and mistaken for a count |
-| `prometheus-query` was not a hedge | its whole config is one `remote_read` at the Mimir gateway. **Corrected:** it was also pinned at `replicas: 0`, so it was already switched off and could not have hedged anything |
+| The `global` rule tier was abandoned, not never used | The shipped tree held only a `.gitkeep`, but history contains `rules/files/op/metrics/global/alerts.yaml` and a second team's equivalent, so the tier was scaffolded, populated, then left. Section 3 drops the level rather than re-scaffolding an empty one. **Corrected:** the first draft claimed it was never used across 413 commits |
+| Unit tests were never run | Three `*-tests.yaml` fixtures existed and the chart deliberately excluded them from ConfigMaps, but no CI job ever invoked a test runner: the convention was built and the runner never wired up. CI stage 4 runs the fixtures and fails if any file went unexecuted. **Corrected:** two commits did add a `mimirtool` download, so "no reference in CI" was true only of the final state |
+| Test-exclusion bug | The chart excluded fixtures with `contains "tests"` rather than a suffix match, so a file such as `integration-tests-alerts.yaml` would have been dropped from every ConfigMap and never deployed. Section 5 matches `hasSuffix "-tests.yaml"`, and CI stage 5 asserts every non-test file lands in exactly one ConfigMap |
+| Owner allow-list drifted from reality | The `owner` label was validated against 18 values hand-maintained in `validation.yaml`, unconnected to the folders that existed, so the list and the teams diverged silently. Ownership is now derived from the folder tree and CODEOWNERS in CI stage 1 |
+| Environment selector sprawl | 73 of 79 rule files carried an environment matcher, **210** matchers in deployable rules across 8 distinct shapes including a lone negation `!="dev"`, which would have made a later tenant split an archaeology exercise. Section 4 fixes one canonical form so the environment set stays derivable from the rule itself. **Corrected:** the first draft said 229, which counted 19 more occurrences inside test fixtures |
+| Tenant hardcoded and unowned | The tenant path was written as a fixed segment under `/tmp/rules/` in four backend values files, so the rules repository contained no commit that could change it. Tenancy became a per-ConfigMap sidecar annotation for this reason |
+| Mimir alerts were self-referential | **60** `Mimir*` rule definitions across 54 unique alert names were evaluated by Mimir's own ruler against Mimir's own storage, so they died with the thing they watched. Section 8 moves that class of alert to a dedicated meta Prometheus. **Corrected:** the first draft said 10, a number taken from `head`-truncated grep output and mistaken for a count |
+| `prometheus-query` was not a hedge | The apparent second query path was one `remote_read` pointed at the Mimir gateway, so it depended on the component it would have hedged against. **Corrected:** it was also pinned at `replicas: 0`, so it was already switched off and could not have hedged anything |
 | Helm glob semantics | verified on Helm v4.2.3: `*` does not cross `/`, `**` does |
 | Sidecar tenant override | `FOLDER_ANNOTATION` defaults to `k8s-sidecar-target-directory`; value may be relative |
 | Sidecar delete path | `src/resources.py`, `_process_config_map(..., item_removed=True)` to `remove_file()` |
