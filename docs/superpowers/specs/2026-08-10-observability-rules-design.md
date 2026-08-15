@@ -22,22 +22,14 @@ dashboards  git -> Grafana Git Sync -> Grafana          (ArgoCD not involved)
 Mixins are not a third path but a source that fans out into both, rendering
 alerts into the first and dashboards into the second.
 
-The design is a rebuild of "***REMOVED***", a working system at a previous employer,
-whose repositories are archived locally at `~/git/old-work` for reference:
-
-| Repo | Commits | What it was |
-| --- | --- | --- |
-| `***REMOVED***-alerting` | 413 | The Helm chart plus every team's rules |
-| `argocd-op-apps` | 806 | ArgoCD Application/ApplicationSet definitions |
-| `argocd-op-helm-charts` | 236 | Wrapper charts and per-env values for the backends |
-| `***REMOVED***-alerts` | 2 | An abandoned proposal for a restructured rules repo |
-
-***REMOVED*** worked. This design keeps its shape and fixes the specific things that
-went wrong, each of which is cited with evidence in Appendix A.
+The design is a rebuild of a prior system that solved this same problem in
+production. That system worked. This design keeps its shape and fixes the
+specific things that went wrong, each of which is cited with evidence in
+Appendix A.
 
 ### Out of scope
 
-- SLOs (***REMOVED*** used pyrra; deliberately deferred)
+- SLOs (the prior system used pyrra; deliberately deferred)
 - Alertmanager configuration and routing
 - Deploying or configuring Mimir, Loki, or ArgoCD themselves
 - Instrumentation and collector configuration
@@ -102,20 +94,20 @@ named prerequisite rather than assumed.
 └── README.md
 ```
 
-Two structural differences from ***REMOVED***:
+Two structural differences from the prior system:
 
 **The `regional`/`global` level is gone.** With a single global stack it has no
-meaning. ***REMOVED*** scaffolded it everywhere, populated it briefly, then abandoned
-it: its history contains `metrics/global/alerts.yaml`, but the tree it shipped
-with held only a `.gitkeep`.
+meaning. The prior system scaffolded it everywhere, populated it briefly, then
+abandoned it: its history contains `metrics/global/alerts.yaml`, but the tree it
+shipped with held only a `.gitkeep`.
 
-**The second level names the evaluation target, not the signal.** ***REMOVED*** used
-`metrics/` and `logs/`, which read as signals but always meant destinations
-(Mimir ruler, Loki ruler). Once a third destination exists that is also metrics
-(Section 8), the signal reading breaks. `mimir/`, `loki/`, `prometheus/` answers
-the question actually asked when an alert is not firing: which ruler was supposed
-to evaluate this. It also leaves room for Tempo or a second Prometheus without
-another rename.
+**The second level names the evaluation target, not the signal.** The prior
+system used `metrics/` and `logs/`, which read as signals but always meant
+destinations (Mimir ruler, Loki ruler). Once a third destination exists that is
+also metrics (Section 8), the signal reading breaks. `mimir/`, `loki/`,
+`prometheus/` answers the question actually asked when an alert is not firing:
+which ruler was supposed to evaluate this. It also leaves room for Tempo or a
+second Prometheus without another rename.
 
 Subfolders below the target level are permitted for grouping, for example
 `rules/payments/mimir/checkout/latency-alerts.yaml`.
@@ -132,8 +124,8 @@ Subfolders below the target level are permitted for grouping, for example
   template fails rather than truncating.
 - Alert names must be unique across the whole repository (see Section 4).
 
-***REMOVED*** silently rewrote `_` to `-` when deriving object names. A CI error is
-better than a silent rename.
+The prior system silently rewrote `_` to `-` when deriving object names. A CI
+error is better than a silent rename.
 
 ### Team list
 
@@ -209,7 +201,7 @@ This is the single highest-leverage decision in the spec for goal 3. It makes th
 environment set of every rule machine-readable **from the rule itself**, so a
 future tenant split can parse the selector, emit the ConfigMap into exactly those
 tenants, and delete the selector, with no team re-declaring anything and no file
-moves. ***REMOVED*** accumulated 210 matchers across its deployable rules in 8
+moves. The prior system accumulated 210 matchers across its deployable rules in 8
 different shapes including a lone negation, which would have made the same
 migration an archaeology exercise.
 
@@ -325,9 +317,9 @@ one byte and reports success.
 
 Label values are quoted so a tenant like `true` or `01` stays a string.
 
-**`hasSuffix "-tests.yaml"`, not `contains "tests"`.** ***REMOVED*** used the latter,
-so a legitimately named file such as `integration-tests-alerts.yaml` would have
-been silently excluded from every ConfigMap and never deployed.
+**`hasSuffix "-tests.yaml"`, not `contains "tests"`.** The prior system used the
+latter, so a legitimately named file such as `integration-tests-alerts.yaml`
+would have been silently excluded from every ConfigMap and never deployed.
 
 **The tenant is in the object name; the data key is not.** Each tenant has its own
 ruler directory, so data keys need not be unique across tenants, while Kubernetes
@@ -351,12 +343,12 @@ One tenant. `values.tenant` is set once and every ConfigMap carries
 resolves against its `FOLDER`. The sidecar is configured with `FOLDER: /tmp/rules`,
 without the tenant.
 
-Behaviour is identical to ***REMOVED***'s. The difference is where the tenant
+Behaviour is identical to the prior system's. The difference is where the tenant
 decision lives: in the chart, per object, rather than in the ruler's pod spec,
-per container. ***REMOVED*** hardcoded `/tmp/rules/***REMOVED***` into four backend values
-files and its rules repo contains zero commits mentioning tenants across 413
-commits, so any split would have required a ruler change discovered at the moment
-of need.
+per container. That system hardcoded `/tmp/rules/<tenant>` into four backend
+values files and its rules repo contains zero commits mentioning tenants across
+413 commits, so any split would have required a ruler change discovered at the
+moment of need.
 
 ### The move to many tenants
 
@@ -458,10 +450,10 @@ the tenant would make CI validate against a different tenant from the one
 receiving the rules, which is precisely the silent-null failure this design keeps
 trying to eliminate.
 
-**Plain Applications, not ApplicationSets.** ***REMOVED*** used cluster generators
-selecting on `platform`/`environment`/`class` cluster-secret labels because it
-fanned out to many EKS clusters. There is one global stack here, so a generator
-matching one destination is ceremony that hides the destination.
+**Plain Applications, not ApplicationSets.** The prior system used cluster
+generators selecting on `platform`/`environment`/`class` cluster-secret labels
+because it fanned out to many EKS clusters. There is one global stack here, so a
+generator matching one destination is ceremony that hides the destination.
 
 **No `CreateNamespace=true`.** The backends already run, so the namespaces exist.
 Keeping the option would let a typo in the namespace field silently create an
@@ -488,7 +480,7 @@ by the backends already existing.
 
 ## 8. Meta-monitoring Prometheus
 
-Alerts about Mimir must not be evaluated by Mimir. ***REMOVED***'s
+Alerts about Mimir must not be evaluated by Mimir. The prior system's
 `rules/op/metrics/regional/mimir-alerts.yaml` held 60 rule definitions across 54
 unique `Mimir*` alert names, including `MimirIngesterUnhealthy`,
 `MimirRequestErrors`, `MimirFrontendQueriesStuck` and `MimirKVStoreFailure`, all
@@ -618,7 +610,7 @@ reads the repository and the Helm chart globs inside the chart directory, so
 neither can consume a CI-only artifact. Each generated file carries a header
 naming its mixin and version, CI re-renders and fails on any diff, and every
 `mixins/<name>/jsonnetfile.lock.json` is committed so Renovate can bump each mixin
-independently, the same way ***REMOVED***'s Renovate bumped mirrored image tags.
+independently, the same way the prior system's Renovate bumped mirrored image tags.
 
 **A coupling worth naming:** mixins emit recording rules that their own dashboards
 then query. If the rules half fails to deploy while the dashboards half succeeds,
@@ -644,15 +636,15 @@ cheapest first.
    and for the bypass it has already cost. `prometheus/` only under the
    configured platform-team folder.
 2. **Contract.** `promruval validate --config-file validation.yaml <paths...>`
-   with explicit non-test file paths, carrying ***REMOVED***'s four rules minus its
-   hand-maintained owner list, which stage 1 now derives from the filesystem.
+   with explicit non-test file paths, carrying the prior system's four rules minus
+   its hand-maintained owner list, which stage 1 now derives from the filesystem.
    Confirm during implementation whether the installed promruval needs a
    dialect flag to parse LogQL rules; do not assume the PromQL parser accepts them.
 3. **Syntax.** `promtool check rules` for mimir and prometheus targets,
    `lokitool rules check` for loki.
 4. **Unit tests.** `promtool test rules` over `*-tests.yaml`, failing if any test
-   file was not executed, so a fixture cannot go stale unnoticed the way
-   ***REMOVED***'s three did. **Metrics only.**
+   file was not executed, so a fixture cannot go stale unnoticed the way the
+   prior system's three did. **Metrics only.**
    `lokitool rules` offers list, print, get, delete, load, diff, sync, prepare,
    format and check, but **no unit-test command**, so LogQL alert rules cannot be
    behaviourally tested. This asymmetry goes in the README so nobody assumes log
@@ -666,21 +658,22 @@ cheapest first.
    fail on any uid that changed**, since that orphans the live dashboard while
    looking like an ordinary edit. Filenames match `^[a-z0-9-]+\.json$`.
 7. **Mixin drift.** Re-run `make mixins` and fail on any diff, so a hand-edit to
-   generated output cannot survive. This is ***REMOVED***'s SLO drift check applied to
-   a much larger generated surface. Also assert that every generated file carries
-   its mixin-and-version header, and that `jsonnetfile.lock.json` is committed.
+   generated output cannot survive. This is the prior system's SLO drift check
+   applied to a much larger generated surface. Also assert that every generated
+   file carries its mixin-and-version header, and that `jsonnetfile.lock.json` is
+   committed.
 
-The last two checks are the ones ***REMOVED*** could not have had. Asserting that
-every file appears in the output is what catches a file silently excluded from the
-render, which is otherwise indistinguishable from a file that works, and is
-exactly its `contains "tests"` bug. Re-parsing the *extracted* payload catches
+The last two checks are the ones the prior system could not have had. Asserting
+that every file appears in the output is what catches a file silently excluded
+from the render, which is otherwise indistinguishable from a file that works, and
+is exactly its `contains "tests"` bug. Re-parsing the *extracted* payload catches
 template-induced corruption, since `nindent 4` will happily produce broken YAML
-from a source file that validated fine; ***REMOVED*** validated only sources.
+from a source file that validated fine; that system validated only sources.
 
-***REMOVED*** shipped three `*-tests.yaml` files and its chart deliberately excluded
-them from ConfigMaps, but no CI job ever invoked a test runner. Two commits went
-as far as downloading `mimirtool` and never called it. The convention was built and
-the runner never wired up. Stage 4 is that gap closed.
+The prior system shipped three `*-tests.yaml` files and its chart deliberately
+excluded them from ConfigMaps, but no CI job ever invoked a test runner. Two
+commits went as far as downloading `mimirtool` and never called it. The
+convention was built and the runner never wired up. Stage 4 is that gap closed.
 
 GitHub Actions: one workflow on `pull_request` and `push: main` running
 `scripts/check.sh`, with every third-party action pinned by commit SHA and every
@@ -967,9 +960,9 @@ not the sidecar alone.
 1. Enforce backend per-tenant query time, sample, and concurrency limits before
    granting repository write access broadly.
 2. Pin Helm, promruval, promtool, lokitool and k8s-sidecar to tested versions or
-   digests and record their checksums. ***REMOVED*** ran sidecar 1.23.1 and 1.24.3
-   while its artifact repo had mirrored 1.25.3; the delete behaviour cited in
-   Appendix A was read from current upstream and should be confirmed against
+   digests and record their checksums. The prior system ran sidecar 1.23.1 and
+   1.24.3 while its artifact repo had mirrored 1.25.3; the delete behaviour cited
+   in Appendix A was read from current upstream and should be confirmed against
    whichever version is actually pinned.
 3. For Phase 2 only: the constrained CI path described in Section 13.
 
