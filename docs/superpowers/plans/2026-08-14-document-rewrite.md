@@ -102,7 +102,7 @@ Write that number down. It is the count Task 3 must still produce. Note that `/t
 
 Rewrite each reference to the prior system as a neutral description. The substitutions:
 
-- the codename becomes "the prior system", or a noun phrase that reads naturally in context ("the system this design replaces", "the earlier implementation")
+- each affected reference becomes "the prior system", or a noun phrase that reads naturally in context ("the system this design replaces", "the earlier implementation")
 - the standalone repository inventory table near the top of the document is deleted entirely, including its file counts and commit counts
 - the local archive path is deleted. Gate 1 does **not** catch it, because it is written tilde-relative and the configured patterns match zero discovered paths. This is a manual obligation.
 - no sentence may state the category of the removed words
@@ -216,7 +216,7 @@ was the only part that taught nothing."
 - [ ] **Step 1: Fix the plan's one reference**
 
 ```bash
-rg -n -i 'the prior system|<codename>' docs/superpowers/plans/2026-08-10-repository-foundation.md
+rg -n -i 'the prior system|<term>' docs/superpowers/plans/2026-08-10-repository-foundation.md
 ```
 
 Rewrite the single line referencing the prior system's owner allow-list to neutral framing.

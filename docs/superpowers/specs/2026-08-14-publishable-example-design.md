@@ -17,9 +17,9 @@ surface.
 
 ## 1. Why this exists
 
-The repository was built as a rebuild of a working system at a previous
-employer. That heritage is the reason nearly every rule in it exists, and it is
-also the reason the repository cannot be published as it stands.
+The repository was built as a rebuild of a real, working system. That heritage
+is the reason nearly every rule in it exists, and it is also the reason the
+repository cannot be published as it stands.
 
 Two text strings, labelled `TERM-A` and `TERM-B`, must go. This document does
 not assert their semantic categories or final locations. Gate 2 and the freeze
@@ -170,9 +170,9 @@ a non-empty list; every entry has exactly `id` and `value`. `id` must match
 Duplicate YAML keys, unknown keys, custom tags, malformed YAML, duplicate ids
 and values that collide after normalisation all fail.
 
-Ids are opaque by construction. `private-term-01`, never `former-employer`: the
-id appears in findings and in any report, and a descriptive id re-creates the
-semantic crib that made a digest weak.
+Ids are opaque by construction. `private-term-01`, never an id naming what the
+term is: the id appears in findings and in any report, and a descriptive id
+re-creates the semantic crib that made a digest weak.
 
 Values, matched text and parser source snippets are never printed. Diagnostics
 produced **before** a valid denylist has loaded never print the
