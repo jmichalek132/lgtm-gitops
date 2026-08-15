@@ -816,7 +816,7 @@ def test_path_matching_is_not_repeated_per_term(tmp_path, monkeypatch):
 
 
 def test_scan_repository_whole_repo_completes_quickly():
-    """Whole-repository scan cost, recorded for the task report: 41 tracked
+    """Whole-repository scan cost, recorded for the task report: 45 tracked
     files, one term, must stay well inside a sane budget rather than
     regressing toward the 137s/file quadratic blowup Task 6 measured and
     fixed for find_term itself."""
