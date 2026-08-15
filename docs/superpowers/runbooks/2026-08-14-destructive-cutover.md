@@ -87,6 +87,17 @@ A malformed object, missing LFS object, unreadable object, NUL-containing textua
 
 Note: `git log -S` is pickaxe history *selection*, not an exhaustive scan of reachable blobs. It is not sufficient and must not be substituted.
 
+Note: `git grep -E` must not be used for a freeze sweep either. On this platform (git 2.55.0, macOS 26.6) `\b` is not a word boundary in `git grep`'s ERE mode, it is a literal `b`, so `\bTOKEN\b` searches for `bTOKENb`. Reproduce in a scratch repository holding the two lines `alpha 1234567 omega` and `xx b1234567b yy`:
+
+```bash
+git grep -n -o -E '\bomega\b'                 # exit 1, no match, though omega is a whole word
+git grep -n -o -E '\b[0-9a-f]{7,40}\b'        # matches only b1234567b
+git grep -n -o -E 'b[0-9a-f]{7,40}b'          # byte-identical output, proving \b is a literal b
+git grep -n -o -P '\b[0-9a-f]{7,40}\b'        # matches both 1234567 and b1234567b
+```
+
+The failure is silent and content-dependent, which is what makes it dangerous here. A pattern whose character class happens to contain `b` still returns plausible-looking matches, so the sweep appears to have worked; a pattern without `b` returns nothing and exits 1, which is indistinguishable from clean. Both were observed in this repository: a `\b`-anchored ERE sweep of `docs/` and `README.md` for SHA-like tokens reported 5 of the 11 actually present, every one truncated to a `b`-delimited interior of the real token, and it missed the corpus commit pinned in the design's section 6 entirely. Use `git grep -P`, or `rg -P` with explicit lookaround such as `(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])`; both returned all 11.
+
 - [ ] **Classify every match by surface**
 
 The freeze report classifies each match as: blob content, commit or tag message, repository path, ref name, identity, `.gitmodules`, gitlink, or Git LFS object.

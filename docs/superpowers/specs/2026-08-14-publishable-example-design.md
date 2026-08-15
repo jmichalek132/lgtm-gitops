@@ -596,6 +596,11 @@ Against the rewritten repository, not assumed:
 `git log -S` is pickaxe *history selection*, not an exhaustive scan of
 reachable blobs, and is not sufficient on its own.
 
+`git grep -E` is not sufficient either: on this platform `\b` is a literal `b`
+in its ERE mode rather than a word boundary, so a `\b`-anchored sweep can miss
+tokens and exit clean. The sweep uses `git grep -P` or `rg -P` with explicit
+lookaround; the cutover runbook records the reproduction.
+
 ### Remote
 
 Delete and recreate. **A force-push is not an acceptable fallback**: it leaves
