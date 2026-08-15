@@ -1,4 +1,4 @@
-# observability-rules
+# lgtm-gitops
 
 Alerting rules, recording rules and dashboards for the global Mimir, Loki and
 meta-Prometheus stack. Teams own their own folder; the platform team owns the

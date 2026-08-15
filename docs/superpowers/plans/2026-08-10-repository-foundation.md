@@ -1918,7 +1918,7 @@ validationRules:
           annotations: ["runbook_url", "dashboard_url"]
 ```
 
-Note there is deliberately no `allowedValues` list for `owner`: ***REMOVED*** maintained one by hand and it drifted out of sync with reality. `rulecheck.py` derives the truth from the filesystem instead.
+Note there is deliberately no `allowedValues` list for `owner`: the prior system maintained one by hand and it drifted out of sync with reality. `rulecheck.py` derives the truth from the filesystem instead.
 
 Then run: `./scripts/check.sh`
 Expected: FAIL, `no such file or directory`.
