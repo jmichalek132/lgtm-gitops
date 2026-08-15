@@ -301,17 +301,18 @@ corpus, counting distinct nine-grams of each view after the scanner's own
 normalisation: the source view holds 220,826, and the `{P}` view contributes a
 further 187,695 the source view does not, roughly doubling the surface a term
 can collide with. The counts move with the corpus, so the ratio rather than the
-totals is the durable claim, and the pinned commit is what keeps them
-re-derivable. `a zephyr gateway` matches the tests' synthetic term `zephyrgate`
-under `{P}` and not in source. The example is synthetic on purpose: one
-constructed from a private term would itself be a derivation of it, which the
-security boundary above forbids. The collision cost is accepted deliberately: a
-false positive blocks and is triaged, whereas a false negative publishes.
-Anchoring deletion-view matches to an original word start was measured to
-remove both observed false positives while preserving every evasion catch, and
-was rejected because it also creates a false negative for a term embedded
-mid-word and separator-split. The consequence for triage is real and is why
-findings must carry the mask that produced them.
+totals is the durable claim; the commit is named for re-derivation in this
+repository, and the section 6 rewrite does not preserve that hash.
+`a zephyr gateway` matches the tests' synthetic term `zephyrgate` under `{P}`
+and not in source. The example is synthetic on purpose: one constructed from a
+private term would itself be a derivation of it, which the security boundary
+above forbids. The collision cost is accepted deliberately: a false positive
+blocks and is triaged, whereas a false negative publishes. Anchoring
+deletion-view matches to an original word start was measured to remove both
+observed false positives while preserving every evasion catch, and was rejected
+because it also creates a false negative for a term embedded mid-word and
+separator-split. The consequence for triage is real and is why findings must
+carry the mask that produced them.
 
 Every content match reports `path: <opaque-id>`, plus the view and the deletion
 mask that produced it. After a valid denylist has loaded, every repository path
