@@ -298,14 +298,16 @@ execution. The `\U` and `\u` escapes are likewise distinct.
 candidate, so a term can match across an original word boundary: over this
 repository's 292k-character corpus, the deletion views expose 105,288 nine-grams
 that do not exist in the source view, against 103,858 that do, roughly doubling
-the surface a term can collide with. `we over***REMOVED*** sections` matches a
-nine-character term under `{P}` and not in source. This is accepted
-deliberately: a false positive blocks and is triaged, whereas a false negative
-publishes. Anchoring deletion-view matches to an original word start was
-measured to remove both observed false positives while preserving every evasion
-catch, and was rejected because it also creates a false negative for a term
-embedded mid-word and separator-split. The consequence for triage is real and
-is why findings must carry the mask that produced them.
+the surface a term can collide with. `a zephyr gateway` matches the tests'
+synthetic term `zephyrgate` under `{P}` and not in source. The example is
+synthetic on purpose: one constructed from a private term would itself be a
+derivation of it, which the security boundary above forbids. The collision cost
+is accepted deliberately: a false positive blocks and is triaged, whereas a
+false negative publishes. Anchoring deletion-view matches to an original word
+start was measured to remove both observed false positives while preserving
+every evasion catch, and was rejected because it also creates a false negative
+for a term embedded mid-word and separator-split. The consequence for triage is
+real and is why findings must carry the mask that produced them.
 
 Every content match reports `path: <opaque-id>`, plus the view and the deletion
 mask that produced it. After a valid denylist has loaded, every repository path
