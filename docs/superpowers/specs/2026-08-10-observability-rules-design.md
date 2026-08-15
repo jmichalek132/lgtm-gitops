@@ -345,10 +345,10 @@ without the tenant.
 
 Behaviour is identical to the prior system's. The difference is where the tenant
 decision lives: in the chart, per object, rather than in the ruler's pod spec,
-per container. That system hardcoded `/tmp/rules/<tenant>` into four backend
-values files and its rules repo contains zero commits mentioning tenants across
-413 commits, so any split would have required a ruler change discovered at the
-moment of need.
+per container. That system wrote a literal tenant name as a fixed segment under
+`/tmp/rules/` in four backend values files, and its rules repo contains zero
+commits mentioning tenants across 413 commits, so any split would have required
+a ruler change discovered at the moment of need.
 
 ### The move to many tenants
 
