@@ -3,6 +3,7 @@
 Each test here fails if a piece of the second team is removed. Without them,
 the fixture is decoration that a future refactor would delete without noticing.
 """
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,9 +14,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def run_checks(root: Path) -> subprocess.CompletedProcess:
+    # BASE_REF must not reach the child. CI's pull_request runs export it so
+    # the real checkout's uid-change detection can diff against the base
+    # commit, but repo_copy is a fresh `git init` with no history by design,
+    # so any inherited base sha is unresolvable there and rulecheck.py
+    # correctly reports the failed diff as a finding, breaking every
+    # baseline-is-clean assumption below for a reason unrelated to the
+    # mutation under test. First seen on the first pull_request-event run
+    # this repository ever had; push-event and local runs leave BASE_REF
+    # unset, which is why the suite was green everywhere else.
+    env = {k: v for k, v in os.environ.items() if k != "BASE_REF"}
     return subprocess.run(
         ["python3", "scripts/rulecheck.py", str(root)],
-        cwd=root, capture_output=True, text=True,
+        cwd=root, capture_output=True, text=True, env=env,
     )
 
 
