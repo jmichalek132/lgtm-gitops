@@ -198,3 +198,9 @@ subfolder feature depends on, and promtool's PromQL parser, which decides
 which expressions are even valid, are both version-sensitive. If a check
 passes locally and fails in CI, compare versions first: `helm version --short`,
 `promtool --version`, `promruval version`, `lokitool version`.
+
+## History
+
+On 2026-09-02 this repository was published from a private predecessor after a
+full history rewrite. Every commit hash changed on that date; the pre-rewrite
+history is not public and is not restorable from this repository.
