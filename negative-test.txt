@@ -1,0 +1,2 @@
+This file exists only to fail Gate 1 on purpose for the protection negative test.
+synthetic personal path: /Users/synthetic-negative-test/scratch/file.txt
