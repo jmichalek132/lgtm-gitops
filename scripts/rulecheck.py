@@ -620,8 +620,14 @@ ENV_ANY_RE = re.compile(
     ENV_LABEL_ALT + r"""\s*(?:=~|!~|=|!=)\s*"""
     r"""(?:"[^"]*"|'[^']*'|`[^`]*`)"""
 )
-# The one permitted form. No \s*, double quotes only: whitespace and alternative
-# delimiters fail this by construction and are reported as non-canonical.
+# The two permitted forms, one per cardinality: equality for exactly one
+# environment, regex alternation for two or more, so every environment set
+# still has exactly one spelling. No \s*, double quotes only: whitespace and
+# alternative delimiters fail both by construction and are reported as
+# non-canonical. The equality value class excludes '|' on purpose: a pipe
+# inside a plain = matches literally in PromQL, so an alternation written
+# with = selects nothing and must be reported, not accepted.
+ENV_CANONICAL_EQ_RE = re.compile(r'deployment_environment="([a-z]+)"')
 ENV_CANONICAL_RE = re.compile(r'deployment_environment=~"([a-z|]+)"')
 
 
@@ -665,12 +671,23 @@ def check_env_matchers(root: Path) -> list[str]:
             )
 
         for occurrence in sorted(set(raw)):
+            equality = ENV_CANONICAL_EQ_RE.fullmatch(occurrence)
+            if equality:
+                value = equality.group(1)
+                if value not in ENVIRONMENTS:
+                    findings.append(
+                        f"{rel}: {name}: unknown environment(s) ['{value}']; "
+                        f"known values are {', '.join(ENVIRONMENTS)}"
+                    )
+                continue
+
             canonical = ENV_CANONICAL_RE.fullmatch(occurrence)
             if not canonical:
                 findings.append(
                     f"{rel}: {name}: '{occurrence}' is not the canonical form. "
-                    f'Use deployment_environment=~"staging|prod": =~ only, double quotes, '
-                    f"no whitespace, no negation."
+                    f'Use deployment_environment="prod" for one environment or '
+                    f'deployment_environment=~"staging|prod" for several: double '
+                    f"quotes, no whitespace, no negation."
                 )
                 continue
 
@@ -685,6 +702,14 @@ def check_env_matchers(root: Path) -> list[str]:
 
             if len(set(values)) != len(values):
                 findings.append(f"{rel}: {name}: duplicate environment values in '{occurrence}'")
+                continue
+
+            if len(values) == 1:
+                findings.append(
+                    f"{rel}: {name}: '{occurrence}' is not the canonical form for a "
+                    f"single environment. One environment is an equality match: "
+                    f'deployment_environment="{values[0]}"; =~ is for two or more.'
+                )
                 continue
 
             expected = [e for e in ENVIRONMENTS if e in values]

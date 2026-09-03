@@ -60,15 +60,20 @@ commit as the two CODEOWNERS entries.
    - label `owner`: exactly your team folder name
    - annotation `summary` (or `message`/`description`)
    - annotation `runbook_url` or `dashboard_url`
-   - a name unique across the whole repository
-3. If the alert is environment-specific, use exactly this form:
+
+   Names need not be globally unique: routing, silences and queries always
+   combine the name with other labels (`owner` at minimum), never the name
+   alone.
+3. If the alert is environment-specific, use exactly one of these forms:
 
    ```promql
+   deployment_environment="prod"
    deployment_environment=~"staging|prod"
    ```
 
-   No matcher at all means all environments. Values come from `dev`, `staging`,
-   `prod`, in that order, no duplicates, no negation, no plain `=`.
+   `=` for exactly one environment, `=~` for two or more. No matcher at all
+   means all environments. Values come from `dev`, `staging`, `prod`, in that
+   order, no duplicates, no negation.
 4. Run `make check` before pushing. CI runs the same *command*, but not with
    the same coverage: **CI cannot run the private term scan** (Gate 2), so a
    green `public-checks` is not evidence that your change was privately

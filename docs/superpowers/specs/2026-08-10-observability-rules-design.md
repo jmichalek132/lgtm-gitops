@@ -167,16 +167,27 @@ The ordered environment list is `dev`, `staging`, `prod`. An expression with no
 
 While a single tenant holds every environment, an environment-specific rule must
 filter in PromQL. That is unavoidable. What is avoidable is variation. CI requires
-exactly:
+exactly one spelling per environment set, chosen by cardinality:
 
 ```promql
+deployment_environment="prod"
 deployment_environment=~"staging|prod"
 ```
 
-Regex match, double quotes, no whitespace around the operator, a non-empty subset
-of the ordered environment list in list order without duplicates, no negation, no
-plain `=`. If an expression contains the matcher more than once, every occurrence
-must be byte-identical.
+Equality for exactly one environment; regex alternation for two or more, a
+subset of the ordered environment list in list order without duplicates. Double
+quotes, no whitespace around the operator, no negation. A pipe under plain `=`
+is a literal in PromQL, so an alternation written with `=` selects nothing and
+is rejected as non-canonical. If an expression contains the matcher more than
+once, every occurrence must be byte-identical.
+
+> **Amendment (2026-09-03).** The original contract required `=~` for every
+> matcher, singletons included, and banned plain `=` outright. The operator now
+> follows the cardinality: `=` for one environment, `=~` for several, and a
+> singleton under `=~` is rejected the same way `=` used to be. Each
+> environment set keeps exactly one canonical spelling, which is the property
+> the derivability argument below rests on; what changed is only which spelling
+> the singleton gets.
 
 > **Implementation deviation (2026-08-13).** This section originally specified
 > that CI parse the PromQL and LogQL selector AST rather than match raw text.
