@@ -913,6 +913,34 @@ def test_dashboards_rejects_bad_filename(tmp_path):
     assert any("filename" in f.lower() for f in findings)
 
 
+def test_dashboards_accepts_nested_folders(tmp_path):
+    write(tmp_path, "dashboards/payments/checkout/funnels/conversion.json",
+          dash("payments-conversion"))
+    assert rulecheck.check_dashboards(tmp_path) == []
+
+
+def test_dashboards_rejects_a_bad_nested_segment(tmp_path):
+    # Same segment rule as rules/: a folder that cannot be a DNS label would
+    # only fail later, at Git Sync time, as a Grafana folder name.
+    write(tmp_path, "dashboards/payments/Check_Out/conversion.json",
+          dash("payments-conversion"))
+    findings = rulecheck.check_dashboards(tmp_path)
+    assert any("Check_Out" in f and "segment" in f for f in findings)
+
+
+def test_dashboards_rejects_a_file_with_no_team_folder(tmp_path):
+    write(tmp_path, "dashboards/orphan.json", dash("orphan"))
+    findings = rulecheck.check_dashboards(tmp_path)
+    assert any("no team" in f for f in findings)
+
+
+def test_dashboards_detects_duplicate_uids_across_nesting_levels(tmp_path):
+    write(tmp_path, "dashboards/payments/a.json", dash("same-uid"))
+    write(tmp_path, "dashboards/payments/deep/nest/b.json", dash("same-uid"))
+    findings = rulecheck.check_dashboards(tmp_path)
+    assert any("same-uid" in f and "unique" in f for f in findings)
+
+
 def test_dashboards_detects_a_changed_uid_against_the_base_ref(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True)
