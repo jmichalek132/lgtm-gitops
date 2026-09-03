@@ -12,15 +12,19 @@
 # prometheus sha256sums.txt, loki SHA256SUMS, promruval *_checksums.txt).
 # A version bump changes the artifact name (or, for lokitool, the content),
 # so a stale line fails the download loudly instead of verifying silently.
+495d75b404a96fb664f1ca3f8cb01db2210aacc62dbfa1bbab30916abbb20a57  helm-v3.16.3-darwin-amd64.tar.gz
 3a39f690173086e6eea17674751eb3c8b970c02697e49cecd4093eaa3cf89dcd  helm-v3.16.3-darwin-arm64.tar.gz
 f5355c79190951eed23c5432a3b920e071f4c00a64f75e077de0dd4cb7b294ea  helm-v3.16.3-linux-amd64.tar.gz
 5bd34ed774df6914b323ff84a0a156ea6ff2ba1eaf0113962fa773f3f9def798  helm-v3.16.3-linux-arm64.tar.gz
+de958826f9ca20003b30c48fa3f2fcfa67b2a3aebcabd6230e90bb94f92d86e8  prometheus-3.1.0.darwin-amd64.tar.gz
 8ebe1d60d8864ae3e10a359c3b543563e972505e5ef6fe1d00586d86a7e813fc  prometheus-3.1.0.darwin-arm64.tar.gz
 9a9d1e115d1745826b13aec3f1409780b9fcf1d4206746cb4faee46ca5add70c  prometheus-3.1.0.linux-amd64.tar.gz
 c12b9e368006873df0c8865771af0434a3edfc8c8eaeea62b73d3974bff7f2a1  prometheus-3.1.0.linux-arm64.tar.gz
+775be5c4b792674347a3f4ba9f7173b4b91b64f8d0ada87cdec1c6939cfff685  promruval_3.2.0_darwin_amd64.tar.gz
 5cfe2c48f64ce57a3d2b39c2d23316cc9be492606fe1969d61b179e18705b6b6  promruval_3.2.0_darwin_arm64.tar.gz
 3ba2179193cbdf830451aae071c4377ca8995fc3858c45762929c81aacacc6fc  promruval_3.2.0_linux_amd64.tar.gz
 aa133d01b68c123318d155436490dbe7155b50656174b7fbb08343bc7d052766  promruval_3.2.0_linux_arm64.tar.gz
+ce9aee69783d2b8634b08f725e67469e1493bf365c088022b73f200d3f3200cf  lokitool-darwin-amd64.zip
 dd5ba14787092ec8958f4e22605a6914c6f7201af5fbbc97221c4c72acf0441e  lokitool-darwin-arm64.zip
 7a93647eabe8ab9a7a91db909307c755890230ff88a8b431571a93e8e1b1265b  lokitool-linux-amd64.zip
 76dc8cc5b3b7f97043783b785e4435e58bc77db9805f6a1b3c2122ce421a7b5d  lokitool-linux-arm64.zip
