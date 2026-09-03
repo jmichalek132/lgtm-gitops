@@ -233,7 +233,7 @@ def test_worker_exception_becomes_a_finding_not_an_empty_result():
     assert "could not be checked" in findings[0]
 
 
-def _die_before_producing_a_result(regex, text, queue):
+def _die_before_producing_a_result(regex, text, queue, started):
     """Stand-in worker target for test_dead_worker_is_reported_as_an_error_not_a_deadline.
 
     Deliberately module-level, not a closure defined inside the test: the
@@ -259,6 +259,33 @@ def test_dead_worker_is_reported_as_an_error_not_a_deadline(monkeypatch):
     assert len(findings) == 1
     assert "deadline" not in findings[0]
     assert "never executed" in findings[0]
+    assert "_disabled" not in patterns[0]
+
+
+def _handshake_late_then_match(regex, text, queue, started):
+    """Stand-in worker that boots slower than the matching deadline, then
+    matches instantly. Module-level for the same spawn-pickling reason as
+    _die_before_producing_a_result above."""
+    import time as _time
+    _time.sleep(1.5)
+    started.set()
+    queue.put(("ok", []))
+
+
+def test_slow_worker_startup_is_not_a_matching_deadline(monkeypatch):
+    """Interpreter startup slower than the whole matching deadline must not
+    time the pattern out or disable it: the clock starts at the worker's
+    handshake. Before the handshake existed, spawn cost was billed to the
+    1.0s deadline, and on a background-QoS-clamped runner (2026-09-03) one
+    spawn per full scan intermittently blew it on an ordinary small file,
+    disabling the pattern for every remaining file and failing the run
+    without a single slow regex."""
+    import scripts.rulecheck as rc
+
+    monkeypatch.setattr(rc, "_search_worker", _handshake_late_then_match)
+    patterns = [{"id": "p", "regex": "x", "message": "probe"}]
+    findings = rc.scan_text_with_patterns("x.txt", "no match here", patterns, deadline=1.0)
+    assert findings == []
     assert "_disabled" not in patterns[0]
 
 
