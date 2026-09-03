@@ -22,6 +22,7 @@ import multiprocessing
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -152,7 +153,19 @@ def escape_path(path: str) -> str:
     return path.encode("unicode_escape").decode("ascii")
 
 
-def _search_worker(regex: str, text: str, queue) -> None:
+def _search_worker(regex: str, text: str, queue, started) -> None:
+    # The handshake, unconditionally first: everything before this line is
+    # interpreter startup (the spawn context boots a fresh python and
+    # re-imports this module), which is the environment's cost, not the
+    # pattern's. _search_with_deadline starts the matching clock only when
+    # this fires. It is an Event, NOT a queue item, and that is load-bearing:
+    # Queue.put only hands the item to a feeder thread, and a catastrophic
+    # backtracking match spins in C holding the GIL, so the feeder never gets
+    # scheduled and a queued handshake never reaches the pipe (observed: the
+    # hostile-regex test reported "did not start" for a worker that was
+    # matching furiously). Event.set is a synchronous semaphore post in this
+    # thread and cannot be starved that way.
+    started.set()
     try:
         pattern = re.compile(regex)
         starts = [m.start() for m in pattern.finditer(text)]
@@ -168,6 +181,12 @@ def _search_worker(regex: str, text: str, queue) -> None:
         queue.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
+# How long a worker may take to BOOT before it counts as an environment
+# failure. Generous on purpose: this covers interpreter startup, never
+# matching, and a 'timeout' here would be a lie that disables the pattern.
+_SPAWN_ALLOWANCE_SECONDS = 30.0
+
+
 def _search_with_deadline(regex: str, text: str, deadline: float):
     """Return ('ok', [1-based line numbers]), ('error', message) if the worker
     raised, or ('timeout', None) if the deadline expired.
@@ -178,31 +197,78 @@ def _search_with_deadline(regex: str, text: str, deadline: float):
     result blocks writing to the queue's pipe until something reads it, and
     joining first would deadlock waiting for an exit that can only happen
     after the write it is blocking.
+
+    The matching clock starts at the worker's handshake, not at proc.start().
+    The spawn context boots a fresh interpreter and re-imports this module
+    before the worker executes one character of regex, and that startup cost
+    belongs to the environment, not the pattern: on a background-QoS-clamped
+    runner (2026-09-03) startup jitter alone pushed one spawn in a full scan
+    past the 1.0s deadline on an ordinary small file, and the resulting
+    'timeout' disabled the pattern for every remaining file, failing the run
+    without a single slow regex. A worker that never handshakes inside the
+    generous _SPAWN_ALLOWANCE_SECONDS is an 'error', which does not disable
+    the pattern; only time spent after the handshake can be a 'timeout'.
+
+    "No result in time" after the handshake still has two causes that must
+    not share a diagnosis: a worker that died mid-match (an OOM kill) was
+    killed by the environment, so it is an 'error'; only a worker still
+    running when the clock expires actually exceeded the deadline.
     """
     ctx = multiprocessing.get_context("spawn")
     queue = ctx.Queue()
-    proc = ctx.Process(target=_search_worker, args=(regex, text, queue), daemon=True)
+    started = ctx.Event()
+    proc = ctx.Process(target=_search_worker, args=(regex, text, queue, started), daemon=True)
     proc.start()
+
+    # Wait for the handshake, noticing a dead worker promptly rather than
+    # sitting out the full allowance: a failed spawn (an interpreter that
+    # could not re-import __main__) or an early crash never sets the event,
+    # and the regex was never executed. A worker that answers on the queue
+    # without ever setting the event (a test stand-in) is passed through
+    # unchanged.
+    handshake_deadline = time.monotonic() + _SPAWN_ALLOWANCE_SECONDS
+    while True:
+        try:
+            answer = queue.get_nowait()
+            proc.join()
+            return answer
+        except Exception:
+            pass
+        if started.wait(0.05):
+            break
+        if not proc.is_alive():
+            exitcode = proc.exitcode
+            # The worker may have answered between the failed get and the
+            # liveness check; drain once before declaring it silent.
+            try:
+                answer = queue.get(timeout=0.25)
+                proc.join()
+                return answer
+            except Exception:
+                proc.join()
+                return "error", (
+                    f"matching worker exited with code {exitcode} without producing "
+                    f"a result, so this pattern was never executed against this file"
+                )
+        if time.monotonic() > handshake_deadline:
+            proc.kill()
+            proc.join()
+            return "error", (
+                f"matching worker did not start within {_SPAWN_ALLOWANCE_SECONDS:g}s, "
+                f"so this pattern was never executed against this file"
+            )
+
     try:
         status, payload = queue.get(timeout=deadline)
     except Exception:
-        # "No result in time" has two causes that must not share a diagnosis
-        # or a consequence. If the process is already gone it died before it
-        # could put anything (a failed spawn, an interpreter that could not
-        # re-import __main__, an OOM kill): the regex was never executed, so
-        # calling it a matching deadline is false, and disabling the pattern
-        # for every remaining file turns an environment fault into a silent
-        # scan of nothing. Only a worker still running when the clock expired
-        # actually exceeded the deadline; 'error' findings do not disable the
-        # pattern, 'timeout' findings do.
         proc.join(timeout=0)
         died, exitcode = (not proc.is_alive()), proc.exitcode
         proc.kill()
         proc.join()
         if died:
             return "error", (
-                f"matching worker exited with code {exitcode} without producing a "
-                f"result, so this pattern was never executed against this file"
+                f"matching worker exited with code {exitcode} mid-match without "
+                f"producing a result"
             )
         return "timeout", None
     proc.join()
