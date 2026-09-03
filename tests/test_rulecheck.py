@@ -363,17 +363,37 @@ def test_envmatcher_accepts_canonical_form(tmp_path):
     assert rulecheck.check_env_matchers(tmp_path) == []
 
 
-def test_envmatcher_accepts_a_single_value(tmp_path):
+def test_envmatcher_accepts_plain_equals_for_a_single_value(tmp_path):
     write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
-          expr_rule('up{deployment_environment=~"prod"} == 0'))
+          expr_rule('up{deployment_environment="prod"} == 0'))
     assert rulecheck.check_env_matchers(tmp_path) == []
 
 
-def test_envmatcher_rejects_plain_equals(tmp_path):
+def test_envmatcher_rejects_regex_operator_for_a_single_value(tmp_path):
+    # One environment set, one spelling: a singleton is an equality match, so
+    # =~"prod" and ="prod" must not both pass or the derivation stops being
+    # canonical.
     write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
-          expr_rule('up{deployment_environment="prod"} == 0'))
+          expr_rule('up{deployment_environment=~"prod"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f and '="prod"' in f for f in findings)
+
+
+def test_envmatcher_rejects_an_alternation_under_plain_equals(tmp_path):
+    # A pipe inside a plain = matches the literal string "staging|prod" in
+    # PromQL, so this selects nothing while looking like it selects two
+    # environments. It must be reported, not read as an alternation.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment="staging|prod"} == 0'))
     findings = rulecheck.check_env_matchers(tmp_path)
     assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_unknown_environment_under_plain_equals(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment="perf"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("perf" in f for f in findings)
 
 
 def test_envmatcher_rejects_negation(tmp_path):
