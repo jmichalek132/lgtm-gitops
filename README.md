@@ -158,8 +158,36 @@ for exactly what this does and does not make safe.
 
 ## Local setup
 
-This machine's Python is externally managed (PEP 668), so a bare `pip install`
-fails. Create and activate a virtualenv first, then install into that:
+```bash
+make setup                 # venv, python deps, four pinned tools into .venv/bin
+source .venv/bin/activate  # or put .venv/bin first on PATH
+make check
+```
+
+`make setup` parses the tool pins out of `.github/workflows/ci.yaml` (the
+source of truth, so nothing can drift), downloads this platform's binaries,
+verifies them against the pinned checksums in `tools/checksums-local.txt`,
+and installs everything into `.venv/bin`, touching no system path. Supported
+platforms: macOS arm64, Linux amd64 and arm64; anywhere else it refuses,
+naming the exact tools and versions to install by hand. It is idempotent and
+safe to re-run after a pin bump.
+
+With no local toolchain at all, or to reproduce CI exactly:
+
+```bash
+make check-docker
+```
+
+builds an image holding the same pinned toolchain (installed by the same
+`scripts/setup.sh`, verified against the same checksums) and runs the same
+`make check` CI runs, against a bind mount of this repository. The private
+denylist never enters the image: when `PUBLISHABILITY_TERMS_FILE` is set it
+is bind-mounted read-only for the run; when unset, Gate 2 fails closed
+inside the container exactly as on the host.
+
+The manual path still works if you prefer it. This machine's Python may be
+externally managed (PEP 668), so a bare `pip install` fails; create and
+activate a virtualenv first, then install into that:
 
 ```bash
 python3 -m venv .venv
@@ -175,9 +203,8 @@ activate it for you.
 
 ### Tool versions
 
-CI runs the same commands as `make check`, but it pins its toolchain and your
-machine almost certainly does not. The pins live in `.github/workflows/ci.yaml`
-and are, at the time of writing:
+CI runs the same commands as `make check`. The pins live in
+`.github/workflows/ci.yaml` and are, at the time of writing:
 
 | tool      | CI pin    | installed by                          |
 | --------- | --------- | ------------------------------------- |
