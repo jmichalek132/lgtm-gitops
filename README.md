@@ -81,11 +81,22 @@ commit as the two CODEOWNERS entries.
    not run the same tool *versions* unless you pin them yourself, see
    [Local setup](#local-setup).
 
+Ideas and future work are tracked as GitHub issues, not as TODO comments or
+uncommitted notes.
+
 ## Adding a dashboard
 
-Put it at `dashboards/<your-team>/<name>.json` with a stable `uid`. **Never
-change the `uid` of an existing dashboard**: it orphans the live one and breaks
-every link and annotation pointing at it. CI will catch this.
+Put it at `dashboards/<your-team>/<name>.json`, or nested at any depth below
+your team folder: `dashboards/<your-team>/<area>/.../<name>.json`. Nested
+folders are supported; discovery is recursive, uid checks span the whole
+tree, and CODEOWNERS ownership follows the team prefix down. Every directory
+segment must be a lowercase DNS label of at most 63 bytes, the same rule as
+under `rules/`, so the tree maps onto Grafana folder names. A dashboard
+directly under `dashboards/` with no team folder is rejected.
+
+Give it a stable `uid`. **Never change the `uid` of an existing dashboard**:
+it orphans the live one and breaks every link and annotation pointing at it.
+CI will catch this.
 
 Dashboards reach Grafana through Git Sync, not ArgoCD. Editing in the Grafana UI
 opens a branch, which you turn into a pull request as usual.

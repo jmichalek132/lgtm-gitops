@@ -1334,6 +1334,29 @@ def check_dashboards(root: Path, base_ref: str | None = None) -> list[str]:
         if not DASHBOARD_FILENAME_RE.match(path.name):
             findings.append(f"{rel}: filename must match {DASHBOARD_FILENAME_RE.pattern}")
 
+        # Nesting below the team folder is supported: discovery is recursive
+        # and the uid checks are path-keyed. What is NOT free-form is the
+        # path shape around it. A dashboard needs a team folder to be owned
+        # by (CODEOWNERS matches /dashboards/<team>/ as a prefix, so nested
+        # paths inherit the right owner only if the team segment is there),
+        # and every directory segment follows the same rule as rules/: a
+        # lowercase DNS label of bounded length, so the tree stays mappable
+        # onto Grafana folder names at sync time rather than failing there.
+        if len(rel.parts) < 3:
+            findings.append(
+                f"{rel}: expected dashboards/<team>/.../<file>.json; a dashboard "
+                f"directly under dashboards/ belongs to no team"
+            )
+        for segment in rel.parts[1:-1]:
+            if not DNS_LABEL_RE.match(segment):
+                findings.append(
+                    f"{rel}: directory segment '{segment}' must match {DNS_LABEL_RE.pattern}"
+                )
+            if len(segment.encode()) > MAX_SEGMENT_BYTES:
+                findings.append(
+                    f"{rel}: directory segment '{segment}' exceeds {MAX_SEGMENT_BYTES} bytes"
+                )
+
         try:
             doc = json.loads(path.read_text())
         except json.JSONDecodeError as exc:
