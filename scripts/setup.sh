@@ -35,7 +35,7 @@ case "$arch" in
   aarch64 | arm64) arch=arm64 ;;
 esac
 case "$os-$arch" in
-  darwin-arm64 | linux-amd64 | linux-arm64) ;;
+  darwin-amd64 | darwin-arm64 | linux-amd64 | linux-arm64) ;;
   *)
     cat >&2 <<EOF
 setup: no pinned checksums for $os-$arch, refusing to install unverified

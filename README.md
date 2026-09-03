@@ -173,7 +173,7 @@ make check
 source of truth, so nothing can drift), downloads this platform's binaries,
 verifies them against the pinned checksums in `tools/checksums-local.txt`,
 and installs everything into `.venv/bin`, touching no system path. Supported
-platforms: macOS arm64, Linux amd64 and arm64; anywhere else it refuses,
+platforms: macOS and Linux, amd64 and arm64 each; anywhere else it refuses,
 naming the exact tools and versions to install by hand. It is idempotent and
 safe to re-run after a pin bump.
 
