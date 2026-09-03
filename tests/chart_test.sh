@@ -3,6 +3,17 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 . tests/lib.sh
 
+# Hermetic helm: point every invocation at a private, empty kubeconfig.
+# render() captures stderr together with stdout (deliberately, see lib.sh),
+# and helm 3.16.3 warns on stderr when the HOST's ~/.kube/config is group-
+# or world-readable, which broke "expected empty output" on a machine whose
+# kubeconfig had loose permissions while CI, with no kubeconfig at all,
+# stayed green. mktemp creates the file 0600, so there is nothing to warn
+# about, and `helm template` never needs a real cluster anyway.
+KUBECONFIG=$(mktemp)
+export KUBECONFIG
+trap 'rm -f "$KUBECONFIG"' EXIT
+
 echo "chart: happy path"
 
 render "mimir happy path renders" helm template t . --set target=mimir --set tenant=platform
