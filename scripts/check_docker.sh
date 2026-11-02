@@ -23,7 +23,24 @@ if [ -n "${BASE_REF:-}" ]; then
   run_args+=(-e "BASE_REF=$BASE_REF")
 fi
 if [ -n "${PUBLISHABILITY_TERMS_FILE:-}" ]; then
-  run_args+=(-v "$PUBLISHABILITY_TERMS_FILE:/run/publishability/denylist.yaml:ro")
+  # The mount relocates the file outside /work and dereferences a symlink, so
+  # privatescan's in-repository and symlink checks would pass vacuously inside
+  # the container. Enforce both on the host path before mounting. The path
+  # itself is never printed, matching privatescan's own diagnostics.
+  terms=$PUBLISHABILITY_TERMS_FILE
+  if [ -L "$terms" ] || [ ! -f "$terms" ]; then
+    echo 'check-docker: <denylist-path> must be an existing regular file, not a symlink' >&2
+    exit 1
+  fi
+  terms=$(cd "$(dirname "$terms")" && pwd -P)/$(basename "$terms")
+  case "$terms" in
+    "$(pwd -P)"/*)
+      echo 'check-docker: <denylist-path> is inside the repository' >&2
+      exit 1 ;;
+  esac
+  # --mount, unlike -v, refuses a missing source instead of creating a
+  # directory there.
+  run_args+=(--mount "type=bind,source=$terms,target=/run/publishability/denylist.yaml,readonly")
   run_args+=(-e PUBLISHABILITY_TERMS_FILE=/run/publishability/denylist.yaml)
 fi
 
