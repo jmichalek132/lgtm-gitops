@@ -424,3 +424,27 @@ def test_publishability_config_is_not_exempt_from_its_own_scan(tmp_path):
 
     findings = check_publishability(tmp_path)
     assert findings == ["publishability.yaml:6: probe"], findings
+
+
+def test_shipped_patterns_catch_bare_and_escaped_home_directories():
+    # The probes are assembled at runtime so this file never holds a literal
+    # personal path for Gate 1 to find.
+    patterns = {p["id"]: re.compile(p["regex"]) for p in load_publishability_config(REPO_ROOT)}
+    users, home = "/" + "Users", "/" + "home"
+    for probe in (
+        f"HOME={users}/alice",
+        f'"cwd": "{users}/alice"',
+        f"cd {users}/alice",
+        users.replace("/", "\\/") + "\\/alice\\/",
+        "%2F" + "Users%2Falice",
+        f"{users}/alice/notes/",
+    ):
+        assert patterns["macos-home-path"].search(probe), probe
+    for probe in (f"export HOME={home}/alice", home.replace("/", "\\/") + "\\/alice", "%2f" + "home%2falice"):
+        assert patterns["linux-home-path"].search(probe), probe
+
+
+def test_shipped_patterns_ignore_a_bare_directory_name():
+    patterns = [re.compile(p["regex"]) for p in load_publishability_config(REPO_ROOT)]
+    for text in ("the Users table", "go home/", "/" + "Users/", "/" + "home/ "):
+        assert not any(p.search(text) for p in patterns), text

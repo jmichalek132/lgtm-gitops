@@ -100,12 +100,18 @@ other check.
 version: 1
 patterns:
   - id: macos-home-path
-    regex: '[/]Users[/][^/ \t\r\n]+[/]'
+    regex: '(?:[/]|\\[/]|%2[Ff])Users(?:[/]|\\[/]|%2[Ff])[A-Za-z0-9_][A-Za-z0-9._-]*'
     message: "personal absolute path"
   - id: linux-home-path
-    regex: '[/]home[/][^/ \t\r\n]+[/]'
+    regex: '(?:[/]|\\[/]|%2[Ff])home(?:[/]|\\[/]|%2[Ff])[A-Za-z0-9_][A-Za-z0-9._-]*'
     message: "personal absolute path"
 ```
+
+> **Amendment (2026-11-02).** Both patterns originally required a trailing
+> `/` after the user name, so a bare home directory (`HOME=` followed by the
+> path, a JSON `"cwd"` value) and the JSON-escaped (`\/`) and
+> percent-encoded (`%2F`) spellings all passed. They now match the user-name
+> segment itself, with any of the three separators.
 
 These are conventions, not secrets. A platform-specific absolute home path is a
 shape you *want* readable, so a contributor who trips it understands why
