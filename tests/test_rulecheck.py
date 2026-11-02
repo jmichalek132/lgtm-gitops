@@ -1275,3 +1275,46 @@ def test_envmatcher_accepts_label_replace_reading_the_environment(tmp_path):
     write(tmp_path, "rules/payments/mimir/a-alerts.yaml", expr_rule(
         """'label_replace(up, "env", "$1", "deployment_environment", "(.*)") == 0'"""))
     assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+@pytest.mark.parametrize("pattern, path, expected", [
+    ("/**/**", "scripts/rulecheck.py", True),
+    ("/**/**/x", "x", True),
+    ("/**/**/x", "a/b/x", True),
+    ("/a/**/**/b", "a/b", True),
+    ("/a/**/x/**/b", "a/x/b", True),
+    ("/a/**/x/**/b", "a/p/x/q/b", True),
+    ("/a/**/", "a/q/z", True),
+])
+def test_codeowners_consecutive_doublestars_collapse(pattern, path, expected):
+    # '**/**' is '**' in gitignore semantics. Translated segment by segment it
+    # demanded two separators, so '/**/**' matched nothing while GitHub
+    # matches everything.
+    assert bool(rulecheck.codeowners_pattern_regex(pattern).match(path)) is expected
+
+
+def test_codeowners_consecutive_doublestars_cannot_take_over_governed_paths(tmp_path):
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES + "/**/** @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/" in f and "@org/payments" in f for f in findings)
+
+
+@pytest.mark.parametrize("pattern", [
+    "/a", "/a/", "/a/*", "/a/**", "/a/**/", "/**/b", "/**/**", "/a/**/b",
+    "/a/**/x/**/b", "/a/**/**/b", "/a/x*.py", "/a/x**.py", "/a/*/b",
+])
+def test_codeowners_every_witness_matches_its_own_pattern(pattern):
+    regex = rulecheck.codeowners_pattern_regex(pattern)
+    witnesses = rulecheck.codeowners_pattern_witnesses(pattern)
+    assert regex is not None and witnesses
+    assert all(regex.match(w) for w in witnesses), witnesses
+
+
+def test_codeowners_witnesses_cover_every_zero_or_one_directory_combination():
+    assert rulecheck.codeowners_pattern_witnesses("/a/**/x/**/b") == sorted([
+        "a/x/b",
+        f"a/{rulecheck.CODEOWNERS_PROBE}/x/b",
+        f"a/x/{rulecheck.CODEOWNERS_PROBE}/b",
+        f"a/{rulecheck.CODEOWNERS_PROBE}/x/{rulecheck.CODEOWNERS_PROBE}/b",
+    ])

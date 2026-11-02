@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import glob
+import itertools
 import json
 import multiprocessing
 import re
@@ -1164,12 +1165,10 @@ def codeowners_pattern_regex(pattern: str) -> re.Pattern[str] | None:
         return None
 
     # Segment-wise, as gitignore and hmarr/codeowners buildPatternRegex do:
-    # '**' is special only as a WHOLE segment, and a middle '/**/' matches
-    # ZERO or more directories, so '/a/**/b' owns 'a/b'. A '**' embedded in a
-    # segment is two ordinary stars and never crosses '/'.
-    segs = body.split("/")
-    if len(segs) > 1 and segs[-1] == "":
-        segs[-1] = "**"  # a trailing slash is '/**': everything beneath
+    # '**' is special only as a WHOLE segment, and a leading or middle '**/'
+    # matches ZERO or more directories, so '/a/**/b' owns 'a/b'. A '**'
+    # embedded in a segment is two ordinary stars and never crosses '/'.
+    segs = _codeowners_segments(body)
     out: list[str] = []
     need_slash = False
     last = len(segs) - 1
@@ -1197,28 +1196,56 @@ def codeowners_pattern_regex(pattern: str) -> re.Pattern[str] | None:
                 # hmarr/codeowners match.go:172.
                 out.append("(?:/.*)?")
         need_slash = True
-    return re.compile("^" + "".join(out) + "$")
+    regex = re.compile("^" + "".join(out) + "$")
+
+    # Fail closed on a translation this module cannot model: every witness is
+    # a path the pattern matches by construction, so a regex rejecting one of
+    # its own witnesses is wrong, and an unevaluable pattern is a finding.
+    if not all(regex.match(w) for w in codeowners_pattern_witnesses(pattern)):
+        return None
+    return regex
+
+
+def _codeowners_segments(body: str) -> list[str]:
+    """Split a CODEOWNERS pattern body (no leading '/') into segments, with a
+    trailing slash read as a final '**' and a run of '**' segments collapsed
+    to one ('**/**' means '**' in gitignore semantics; translated segment by
+    segment it would demand two separators and match nothing)."""
+    segs = body.split("/")
+    if len(segs) > 1 and segs[-1] == "":
+        segs[-1] = "**"  # a trailing slash is '/**': everything beneath
+    collapsed: list[str] = []
+    for seg in segs:
+        if seg == "**" and collapsed and collapsed[-1] == "**":
+            continue
+        collapsed.append(seg)
+    return collapsed
 
 
 def codeowners_pattern_witnesses(pattern: str) -> list[str]:
     """Concrete paths the pattern matches, used to probe patterns for paths that
     do not exist yet. A CODEOWNERS line takes effect the moment someone adds the
     file it names, so the line itself is evidence and must be evaluated now.
-    '/**/' matches zero directories as well as one, so both are witnessed."""
-    if pattern == "*" or not pattern.startswith("/"):
+
+    Built from the same segment model as codeowners_pattern_regex: every
+    leading or middle '**' is witnessed as both zero directories and one, across
+    all combinations, and a final '**' (which needs at least one more segment)
+    as one."""
+    if pattern == "*" or not pattern.startswith("/") or not pattern[1:]:
         return []
-    body = pattern[1:]
-    variants = {body, body.replace("/**/", "/")}
-    if body.startswith("**/"):
-        variants.add(body[3:])
-    witnesses = []
-    for variant in sorted(variants):
-        w = variant.replace("**", CODEOWNERS_PROBE).replace("*", CODEOWNERS_PROBE)
-        if w.endswith("/"):
-            w += CODEOWNERS_PROBE
-        if w:
-            witnesses.append(w)
-    return witnesses
+    segs = _codeowners_segments(pattern[1:])
+    last = len(segs) - 1
+    choices: list[list[str | None]] = []
+    for i, seg in enumerate(segs):
+        if seg == "**":
+            choices.append([CODEOWNERS_PROBE] if i == last else [None, CODEOWNERS_PROBE])
+        else:
+            choices.append([seg.replace("*", CODEOWNERS_PROBE) or CODEOWNERS_PROBE])
+    witnesses = {
+        "/".join(part for part in combo if part is not None)
+        for combo in itertools.product(*choices)
+    }
+    return sorted(w for w in witnesses if w)
 
 
 # Directories whose contents are build or tool droppings rather than repository
