@@ -15,8 +15,8 @@
 version: 1
 patterns:
   - id: macos-home-path
-    regex: '[/]Users[/][^/ \t\r\n]+[/]'
+    regex: '(?:[/]|\\[/]|%2[Ff])Users(?:[/]|\\[/]|%2[Ff])[A-Za-z0-9_][A-Za-z0-9._-]*'
     message: "personal absolute path"
   - id: linux-home-path
-    regex: '[/]home[/][^/ \t\r\n]+[/]'
+    regex: '(?:[/]|\\[/]|%2[Ff])home(?:[/]|\\[/]|%2[Ff])[A-Za-z0-9_][A-Za-z0-9._-]*'
     message: "personal absolute path"
