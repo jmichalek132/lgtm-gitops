@@ -914,3 +914,64 @@ def test_cli_defaults_root_to_cwd_when_no_argument_given(tmp_path, tmp_path_fact
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[privatescan] ok" in result.stdout
+
+
+def _commit(repo, *args):
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "-c", "commit.gpgsign=false", "commit", "-q", *args],
+        cwd=repo, check=True,
+    )
+
+
+@pytest.mark.parametrize("scenario", ["removed-later", "message-only", "staged-only"])
+def test_what_a_push_publishes_is_scanned_not_only_the_worktree(tmp_path, scenario):
+    """The working tree is clean in all three scenarios, and the next push
+    publishes the term in all three: in an intermediate commit's blob, in a
+    commit message, and in a staged blob whose on-disk copy was edited."""
+    repo = _git_repo(tmp_path)
+    (repo / "a.txt").write_text(TERM if scenario == "removed-later" else "clean", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+    _commit(repo, "-m", f"port {TERM}" if scenario == "message-only" else "init")
+    if scenario == "removed-later":
+        (repo / "a.txt").write_text("clean", encoding="utf-8")
+        _commit(repo, "-am", "scrub")
+    if scenario == "staged-only":
+        (repo / "a.txt").write_text(TERM, encoding="utf-8")
+        subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+        (repo / "a.txt").write_text("clean again", encoding="utf-8")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
+    assert any("private-term-01" in f for f in findings), scenario
+    assert all(TERM not in f for f in findings)
+
+
+def test_a_term_in_an_unpushed_path_name_is_found(tmp_path):
+    repo = _git_repo(tmp_path)
+    (repo / f"{TERM}.txt").write_text("clean", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    _commit(repo, "-m", "init")
+    subprocess.run(["git", "mv", f"{TERM}.txt", "renamed.txt"], cwd=repo, check=True)
+    _commit(repo, "-m", "rename")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
+    assert any(f.startswith("unpushed path name #") and "private-term-01" in f for f in findings)
+    assert all(TERM not in f for f in findings)
+
+
+def test_history_already_on_a_remote_is_not_rescanned(tmp_path):
+    """Only what the next push adds is in scope: a commit any remote-tracking
+    ref already reaches was published when it was pushed, and rescanning it
+    would fail every run forever over something no local change can undo."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    repo = tmp_path / "work"
+    repo.mkdir()
+    _git_repo(repo)
+    (repo / "a.txt").write_text(TERM, encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+    _commit(repo, "-m", "old")
+    (repo / "a.txt").write_text("clean", encoding="utf-8")
+    _commit(repo, "-am", "scrub")
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
+    assert scan_repository(repo, [{"id": "private-term-01", "value": TERM}]) == []

@@ -588,9 +588,92 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
         )
 
 
+def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
+    """Yield (label, text) for what the next push publishes beyond the
+    working tree: every commit object (message and author lines) and blob
+    reachable from HEAD but from no remote-tracking ref, every path name
+    those objects were recorded under, and the staged blob of every path
+    whose working-tree copy differs from the index.
+
+    iter_scannable_files reads the WORKING TREE, so on its own a term that
+    was committed and then removed in a later commit, a term that appears
+    only in a commit message, and a staged copy edited clean on disk all
+    scan as clean while the next push publishes every one of them.
+
+    Labels are object ids, never paths or content, so they need no redaction.
+    Every discovery or read failure is a DiscoveryFinding, never a skip.
+    """
+
+    def git(*args: str, data: bytes | None = None) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(root), *args], input=data, capture_output=True, check=True
+        ).stdout
+
+    try:
+        born = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD"],
+            capture_output=True,
+        ).returncode == 0
+        listing = git("rev-list", "--objects", "HEAD", "--not", "--remotes") if born else b""
+        wanted: dict[bytes, None] = {}
+        for line in listing.splitlines():
+            wanted[line.partition(b" ")[0]] = None
+        # Path names come from the per-commit diffs, not from rev-list: rev-list
+        # names each object once, by the first path it meets, so a blob renamed
+        # without a content change would lose its old (published) name.
+        # --no-renames reports a rename as delete plus add, so both names
+        # appear; -m includes what a merge itself introduces.
+        logged = git(
+            "log", "--format=", "--name-only", "-z", "--no-renames", "-m",
+            "HEAD", "--not", "--remotes",
+        ) if born else b""
+        names = sorted({n.decode("utf-8", "surrogateescape") for n in logged.split(b"\0") if n.strip()})
+        # `diff-files --raw -z`: ":<mode> <mode> <index sha> <worktree sha> <status>\0<path>\0".
+        # A non-zero index sha is a staged blob whose working-tree copy differs.
+        for meta in git("diff-files", "-z", "--raw", "--no-abbrev").split(b"\0")[0::2]:
+            fields = meta.split(b" ")
+            if len(fields) == 5 and fields[2].strip(b"0"):
+                wanted[fields[2]] = None
+        batch = git("cat-file", "--batch", data=b"".join(s + b"\n" for s in wanted)) if wanted else b""
+    except (subprocess.CalledProcessError, OSError) as exc:
+        yield REPO_MARKER, DiscoveryFinding(
+            f"{REPO_MARKER}: unpushed-object discovery failed, so unpushed history and "
+            f"staged content were not scanned ({_safe_error_detail(exc)})"
+        )
+        return
+
+    # A path name is labelled by its position, never by the name itself.
+    for index, name in enumerate(names, 1):
+        yield f"unpushed path name #{index}", name
+
+    pos = 0
+    while pos < len(batch):
+        nl = batch.index(b"\n", pos)
+        header = batch[pos:nl].split(b" ")
+        if len(header) != 3:  # "<sha> missing": a partial clone or corrupt object store
+            yield REPO_MARKER, DiscoveryFinding(
+                f"{REPO_MARKER}: an unpushed object is unreadable, so it was not scanned"
+            )
+            pos = nl + 1
+            continue
+        sha, kind, size = header
+        body = batch[nl + 1:nl + 1 + int(size)]
+        pos = nl + 2 + int(size)
+        if kind not in (b"commit", b"blob"):
+            continue
+        label = f"{kind.decode()} {sha.decode()}"
+        if b"\x00" in body:
+            yield label, DiscoveryFinding(f"{label}: contains a NUL byte, so it is binary and is rejected")
+            continue
+        try:
+            yield label, body.decode("utf-8")
+        except UnicodeDecodeError:
+            yield label, DiscoveryFinding(f"{label}: not valid UTF-8")
+
+
 def scan_repository(root: Path, terms: list[dict]) -> list[str]:
     """Scan every discovered file's content, and every discovered path, for
-    every term.
+    every term, then everything iter_unpushed_objects yields.
 
     Before any path is printed, in a term finding or in a discovery finding,
     it is checked against the complete matching algorithm: if it matches any
@@ -630,6 +713,15 @@ def scan_repository(root: Path, terms: list[dict]) -> list[str]:
             hit = find_term(payload, needle)
             if hit is not None:
                 findings.append(f"{safe}: {term_id} (view={hit[0]}, mask={hit[1]})")
+
+    for label, payload in iter_unpushed_objects(root):
+        if isinstance(payload, DiscoveryFinding):
+            findings.append(str(payload))
+            continue
+        for term_id, needle in normalised:
+            hit = find_term(payload, needle)
+            if hit is not None:
+                findings.append(f"{label}: {term_id} (view={hit[0]}, mask={hit[1]})")
     return findings
 
 
