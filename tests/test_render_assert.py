@@ -53,3 +53,22 @@ def test_source_findings_does_not_expect_test_fixtures_to_render(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("groups: []\n")
     assert render_assert.deployable_sources(tmp_path) == {"rules/p/mimir/a-alerts.yaml"}
+
+
+def test_render_takes_the_tenant_from_values_yaml_like_argocd(monkeypatch):
+    # The Applications override only target, so validation must not pin a
+    # tenant: a longer tenant in values.yaml could push a generated name past
+    # 253 bytes in deployment while a hardcoded short one passes validation.
+    seen = {}
+
+    class Done:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return Done()
+
+    monkeypatch.setattr(render_assert.subprocess, "run", fake_run)
+    render_assert.render("mimir")
+    assert not any("tenant=" in a for a in seen["argv"])
+    assert "target=mimir" in seen["argv"]
