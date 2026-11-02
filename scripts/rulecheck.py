@@ -382,7 +382,10 @@ PLATFORM_OWNER = team_owner(PLATFORM_TEAM)
 # command, so a fixture there would never run and must not be committed.
 TEST_FIXTURE_TARGETS = ("mimir", "prometheus")
 
-RULE_FILENAME_RE = re.compile(r"^[a-z0-9-]+\.yaml$")
+# The stem must start and end alphanumeric: it becomes the tail of a ConfigMap
+# name, and a DNS-1123 subdomain cannot end in "-" (checkout-.yaml would
+# render platform-payments-mimir-checkout-, which the API server rejects).
+RULE_FILENAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.yaml$")
 DASHBOARD_FILENAME_RE = re.compile(r"^[a-z0-9-]+\.json$")
 DNS_LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 MAX_NAME_BYTES = 253
