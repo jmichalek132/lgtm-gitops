@@ -3,11 +3,13 @@
 
 These catch the failure modes that only exist after templating: a file silently
 excluded from the render, two paths colliding on one generated name, a ConfigMap
-over the 1MiB limit, and template-induced YAML corruption.
+over the 1MiB limit or too big for ArgoCD's default client-side apply, and
+template-induced YAML corruption.
 """
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +18,11 @@ import yaml
 
 TARGETS = ("mimir", "loki", "prometheus")
 CONFIGMAP_LIMIT = 1024 * 1024
+# ArgoCD's default client-side apply copies the whole object, as JSON, into the
+# kubectl.kubernetes.io/last-applied-configuration annotation, and the API
+# server caps all annotations at 256 KiB (apimachinery TotalAnnotationSizeLimitB).
+# That is the binding limit unless the Application sets ServerSideApply=true.
+LAST_APPLIED_LIMIT = 256 * 1024
 HEADROOM = 16 * 1024
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +99,15 @@ def main() -> int:
                 findings.append(f"{name}: missing observability-rules/source-path annotation")
             else:
                 rendered_sources.add(source)
+
+            applied = len(json.dumps(doc, separators=(",", ":")).encode())
+            if applied > LAST_APPLIED_LIMIT - HEADROOM:
+                findings.append(
+                    f"{name}: {applied} bytes as JSON. Client-side apply copies that into "
+                    f"the last-applied-configuration annotation, and annotations are capped "
+                    f"at {LAST_APPLIED_LIMIT} bytes ({HEADROOM} kept as headroom), so "
+                    f"ArgoCD cannot sync it. Split the file."
+                )
 
             for key, payload in doc.get("data", {}).items():
                 if key in keys:

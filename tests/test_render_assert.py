@@ -72,3 +72,17 @@ def test_render_takes_the_tenant_from_values_yaml_like_argocd(monkeypatch):
     render_assert.render("mimir")
     assert not any("tenant=" in a for a in seen["argv"])
     assert "target=mimir" in seen["argv"]
+
+
+def test_main_rejects_a_configmap_too_big_for_last_applied(monkeypatch, capsys):
+    # 300 KiB is far under the 1 MiB ConfigMap limit and still unsyncable by
+    # client-side apply, whose last-applied annotation is capped at 256 KiB.
+    a = "rules/p/mimir/big-rules.yaml"
+    doc = {"kind": "ConfigMap",
+           "metadata": {"name": "platform-p-mimir-big-rules",
+                        "annotations": {"observability-rules/source-path": a}},
+           "data": {"p-mimir-big-rules.yaml": "#" + "x" * (300 * 1024)}}
+    monkeypatch.setattr(render_assert, "render", lambda t: [doc] if t == "mimir" else [])
+    monkeypatch.setattr(render_assert, "deployable_sources", lambda root: {a})
+    assert render_assert.main() == 1
+    assert "last-applied-configuration" in capsys.readouterr().err
