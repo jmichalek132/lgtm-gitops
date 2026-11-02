@@ -1120,3 +1120,82 @@ def test_codeowners_publishability_resists_a_wildcard_override(tmp_path):
                + "/publishability.yaml @org/platform\n/publish*.yaml @org/payments\n")
     findings = rulecheck.check_codeowners(tmp_path)
     assert any("publishability" in f and "@org/payments" in f for f in findings)
+
+
+def test_envmatcher_rejects_whitespace_around_a_multi_value_operator(tmp_path):
+    # Multi-value on purpose: with a single value the singleton finding also
+    # says "canonical", so the whitespace rule itself was never exercised.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule('up{deployment_environment =~ "staging|prod"} == 0'))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("is not the canonical form." in f for f in findings)
+
+
+def test_envmatcher_rejects_a_comment_splitting_the_matcher(tmp_path):
+    # promtool 3.1.0 skips the comment; the rule selects only staging.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: PaymentsA
+        expr: |
+          up{deployment_environment # skipped by the parser
+          ="staging"} == 0
+        labels: {severity: warning, owner: payments}
+        annotations: {summary: S., runbook_url: https://runbooks.internal/x}
+""")
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_ignores_a_matcher_inside_a_comment(tmp_path):
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
+groups:
+  - name: g
+    rules:
+      - alert: PaymentsA
+        expr: |
+          up == 0 # was deployment_environment!="dev"
+        labels: {severity: warning, owner: payments}
+        annotations: {summary: S., runbook_url: https://runbooks.internal/x}
+""")
+    assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+def test_envmatcher_keeps_a_hash_inside_a_string(tmp_path):
+    # The '#' is inside a string, so it is not a comment and the matcher
+    # after it must still be checked.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule("""'up{job="a#b", deployment_environment!="dev"} == 0'"""))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("canonical" in f for f in findings)
+
+
+def test_envmatcher_rejects_an_escaped_quoted_label_name(tmp_path):
+    # "deployment_\x65nvironment" decodes to deployment_environment; promtool
+    # 3.1.0 accepts it and the rule selects only dev.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
+          expr_rule("""'up{"deployment_\\x65nvironment"="dev"} == 0'"""))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("escape" in f for f in findings)
+
+
+def test_envmatcher_accepts_an_escaped_string_in_a_logql_line_filter_chain(tmp_path):
+    write(tmp_path, "rules/payments/loki/a-alerts.yaml", expr_rule(
+        """'sum(count_over_time({job="x"} |~ "a\\\\s+b" != "c" [5m])) > 0'"""))
+    assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+def test_envmatcher_rejects_label_format_writing_the_environment(tmp_path):
+    write(tmp_path, "rules/payments/loki/a-alerts.yaml", expr_rule(
+        """'sum(count_over_time({job="x"} | label_format deployment_environment="prod" [5m])) > 0'"""))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("label_format" in f for f in findings)
+
+
+def test_envmatcher_accepts_a_label_filter_after_a_parser_stage(tmp_path):
+    # '| json | deployment_environment="prod"' filters on the extracted label,
+    # it does not write it.
+    write(tmp_path, "rules/payments/loki/a-alerts.yaml", expr_rule(
+        """'sum(count_over_time({job="x"} | json | deployment_environment="prod" [5m])) > 0'"""))
+    assert rulecheck.check_env_matchers(tmp_path) == []

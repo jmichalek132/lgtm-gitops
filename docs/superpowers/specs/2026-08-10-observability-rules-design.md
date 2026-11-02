@@ -207,6 +207,19 @@ once, every occurrence must be byte-identical.
 > enumerate every spelling the parser accepts, and the parser's list is the one
 > that keeps growing. Revisit the AST decision when a second such bypass appears,
 > or sooner if a maintained PromQL parser with LogQL support becomes available.
+>
+> **Amendment (2026-11-02): the trigger has fired.** A repository review found
+> two more bypasses, both accepted by promtool 3.1.0: a `#` comment between the
+> label name and the operator, and a backslash escape inside a quoted label name
+> (`"deployment_\x65nvironment"`). It also found that LogQL
+> `| label_format deployment_environment="prod"`, which rewrites the label, was
+> counted as a canonical selector, and that a matcher inside a PromQL comment
+> was reported. All four are patched lexically: comments are blanked outside
+> strings before matching, an escaped quoted label name is rejected, and a
+> parser stage writing the label is reported. The patch closes these spellings
+> only; the AST decision is now due, through the upstream Go parsers
+> (`promql/parser`, Loki's `logql/syntax`), which removes the "no single
+> available parser" reason above.
 
 This is the single highest-leverage decision in the spec for goal 3. It makes the
 environment set of every rule machine-readable **from the rule itself**, so a
