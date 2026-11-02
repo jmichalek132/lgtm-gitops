@@ -77,6 +77,45 @@ def source_findings(expected: set[str], rendered: set[str]) -> list[str]:
     return findings
 
 
+def _normalised(text: str) -> str:
+    # The template embeds the file as a `|-` block scalar: YAML folds CRLF to LF
+    # and strip chomping drops trailing line breaks, so compare on that basis.
+    return text.replace("\r\n", "\n").rstrip("\n")
+
+
+def delivery_findings(name: str, target: str, source: str, doc: dict) -> list[str]:
+    """What the ruler sidecar would actually receive from this ConfigMap: the
+    routing label for this target, exactly one data key named after the
+    source path, and that source file's content unchanged. Parsing the payload
+    as YAML alone accepts an empty data map or a payload that is valid but is
+    not the file it claims to be."""
+    findings: list[str] = []
+    rules_label = (doc["metadata"].get("labels") or {}).get("rules")
+    if rules_label != target:
+        findings.append(
+            f"{name}: routing label rules={rules_label!r} for target {target!r}, so the "
+            f"{target} sidecar would not load it"
+        )
+    expected_key = source.removeprefix("rules/").replace("/", "-")
+    data = doc.get("data") or {}
+    if list(data) != [expected_key]:
+        findings.append(
+            f"{name}: data keys {sorted(data)}, expected exactly ['{expected_key}'] from {source}"
+        )
+        return findings
+    try:
+        original = (ROOT / source).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        findings.append(f"{name}: source {source} could not be read to compare ({type(exc).__name__})")
+        return findings
+    if _normalised(data[expected_key]) != _normalised(original):
+        findings.append(
+            f"{name}: payload for '{expected_key}' differs from {source}, so the ruler "
+            f"would load something other than the committed file"
+        )
+    return findings
+
+
 def main() -> int:
     findings: list[str] = []
     rendered_sources: set[str] = set()
@@ -99,6 +138,7 @@ def main() -> int:
                 findings.append(f"{name}: missing observability-rules/source-path annotation")
             else:
                 rendered_sources.add(source)
+                findings.extend(delivery_findings(name, target, source, doc))
 
             applied = len(json.dumps(doc, separators=(",", ":")).encode())
             if applied > LAST_APPLIED_LIMIT - HEADROOM:
