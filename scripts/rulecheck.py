@@ -1355,9 +1355,13 @@ def dashboard_files(root: Path) -> list[Path]:
 
 
 def _uids_at_ref(root: Path, ref: str) -> dict[str, str] | None:
-    """Map relative path -> uid as of the given git ref. Missing files are skipped.
+    """Map relative path -> uid as of the given git ref.
 
-    Returns None if the base ref could not be resolved; {} if resolved but no dashboards.
+    Returns None if the base ref could not be resolved OR one of its dashboard
+    blobs could not be read (a partial clone, a corrupt object store): a
+    baseline missing a dashboard would let that dashboard's uid change pass
+    unexamined. {} if resolved but no dashboards. A base blob that is not valid
+    JSON is skipped: it was never a live dashboard, so it has no uid to orphan.
     """
     try:
         listing = subprocess.run(
@@ -1381,7 +1385,9 @@ def _uids_at_ref(root: Path, ref: str) -> dict[str, str] | None:
                 uid = doc.get("uid")
                 if uid:
                     uids[rel] = uid
-        except (subprocess.CalledProcessError, json.JSONDecodeError):
+        except subprocess.CalledProcessError:
+            return None
+        except json.JSONDecodeError:
             continue
     return uids
 
@@ -1449,7 +1455,8 @@ def check_dashboards(root: Path, base_ref: str | None = None) -> list[str]:
         base_uids = _uids_at_ref(root, base_ref)
         if base_uids is None:
             findings.append(
-                f"base ref '{base_ref}' could not be resolved; uid-change detection did not run. "
+                f"base ref '{base_ref}' could not be resolved or its dashboards could not "
+                f"all be read; uid-change detection did not run. "
                 f"CI needs full history (git clone without --depth) to detect dashboard uid changes."
             )
         else:

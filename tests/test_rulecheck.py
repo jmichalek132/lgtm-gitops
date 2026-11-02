@@ -1234,3 +1234,18 @@ def test_codeowners_leading_doublestar_matches_the_root_directory(tmp_path):
 ])
 def test_codeowners_pattern_semantics(pattern, path, expected):
     assert bool(rulecheck.codeowners_pattern_regex(pattern).match(path)) is expected
+
+
+def test_dashboards_fails_when_a_base_blob_cannot_be_read(tmp_path, monkeypatch):
+    # ls-tree succeeds, then reading one listed blob fails (a partial clone):
+    # the baseline is incomplete, so uid detection must report that it did
+    # not run instead of comparing against a baseline missing that dashboard.
+    def fake_run(command, **kwargs):
+        if "ls-tree" in command:
+            return subprocess.CompletedProcess(command, 0, "dashboards/payments/overview.json\n", "")
+        assert "show" in command
+        raise subprocess.CalledProcessError(128, command)
+
+    monkeypatch.setattr(rulecheck.subprocess, "run", fake_run)
+    findings = rulecheck.check_dashboards(tmp_path, base_ref="HEAD")
+    assert any("uid-change detection did not run" in f for f in findings)
