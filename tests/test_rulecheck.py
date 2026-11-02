@@ -1199,3 +1199,38 @@ def test_envmatcher_accepts_a_label_filter_after_a_parser_stage(tmp_path):
     write(tmp_path, "rules/payments/loki/a-alerts.yaml", expr_rule(
         """'sum(count_over_time({job="x"} | json | deployment_environment="prod" [5m])) > 0'"""))
     assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+def test_codeowners_middle_doublestar_matches_zero_directories(tmp_path):
+    # gitignore and hmarr/codeowners: '/scripts/**/rulecheck.py' owns
+    # scripts/rulecheck.py itself. The '/scripts/*/' reclaim does not.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/scripts/**/rulecheck.py @org/payments\n"
+               + "/scripts/*/rulecheck.py @org/platform\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/rulecheck.py" in f and "@org/payments" in f for f in findings)
+
+
+def test_codeowners_leading_doublestar_matches_the_root_directory(tmp_path):
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/**/scripts/** @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/" in f and "@org/payments" in f for f in findings)
+
+
+@pytest.mark.parametrize("pattern, path, expected", [
+    ("/a/**/b", "a/b", True),
+    ("/a/**/b", "a/x/y/b", True),
+    ("/**/b", "b", True),
+    ("/a/*", "a/x", True),
+    ("/a/*", "a/x/y", False),
+    ("/a/", "a/x/y", True),
+    ("/a/", "a", False),
+    ("/a", "a/x", True),
+    ("/a/x**.py", "a/x.py", True),
+    ("/a/x**.py", "a/x/y.py", False),
+])
+def test_codeowners_pattern_semantics(pattern, path, expected):
+    assert bool(rulecheck.codeowners_pattern_regex(pattern).match(path)) is expected
