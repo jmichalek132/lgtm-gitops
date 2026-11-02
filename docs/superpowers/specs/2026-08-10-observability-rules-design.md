@@ -123,7 +123,7 @@ Subfolders below the target level are permitted for grouping, for example
   `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` and be at most 63 bytes.
 - Generated ConfigMap names and data keys must each be at most 253 bytes. The
   template fails rather than truncating.
-- Alert names must be unique across the whole repository (see Section 4).
+- Alert names need not be unique (see Section 4).
 
 The prior system silently rewrote `_` to `-` when deriving object names. A CI
 error is better than a silent rename.
@@ -149,7 +149,7 @@ enforces the consequences:
 | label `owner` | equals the containing team folder |
 | annotation `summary` | required (`message` and `description` accepted as aliases) |
 | annotation `runbook_url` or `dashboard_url` | at least one required |
-| alert name | unique across the entire repository |
+| alert name | no uniqueness requirement (amended 2026-11-02, below) |
 
 The uniqueness requirement exists because **alerts do not automatically carry the
 rule namespace or source file as a label.** Mimir invokes the Prometheus rule
@@ -157,6 +157,14 @@ manager with empty external labels, and Prometheus adds no file label of its own
 Two identically named alerts in different files with otherwise identical labels
 are therefore indistinguishable to Alertmanager and will be deduplicated. Unique
 names are the cheapest fix and cost teams nothing they would not do anyway.
+
+> **Amendment (2026-11-02).** The uniqueness requirement is dropped, matching the
+> README and commit 54cbef1: routing, silences and queries always combine the
+> alert name with other labels, `owner` at minimum, never the name alone. Because
+> `owner` is mandatory and must equal the team folder, two teams' alerts can never
+> collide. The residual case is one team defining the same name twice with
+> otherwise identical labels; Alertmanager deduplicates those, and avoiding it is
+> left to the owning team rather than enforced by CI.
 
 Alertmanager is out of scope, but `owner` is the label routing will key on later.
 Making it unfakeable now is cheaper than reconciling it after eighty alerts exist.
@@ -653,7 +661,7 @@ cheapest first.
 1. **Structure.** Filename and directory-segment regexes, and generated
    name/key length. Files rejected outside `rules/<team>/<target>/**.yaml`;
    symlinks rejected. CODEOWNERS and folder sets agree in both directions.
-   `owner` label equals team folder. Alert names unique repository-wide.
+   `owner` label equals team folder.
    Canonical environment matcher enforced by a regex over each rule's `expr`
    field only, never over whole-file text, so a matcher in a comment, an
    annotation or a summary cannot influence the result. **This is a deviation
