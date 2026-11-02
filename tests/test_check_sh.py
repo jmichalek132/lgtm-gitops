@@ -262,3 +262,38 @@ def test_check_docker_forwards_base_ref(tmp_path):
     result, args = run_check_docker(tmp_path, {"BASE_REF": "HEAD~1"})
     assert result.returncode == 0, result.stderr
     assert any(a == "-e" and b == "BASE_REF=HEAD~1" for a, b in zip(args, args[1:]))
+
+
+def _denylist(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('version: 1\nterms:\n  - id: private-term-01\n    value: "zzzdockerterm"\n')
+    return path
+
+
+def test_check_docker_refuses_an_in_repository_denylist(tmp_path):
+    # Gitignored and inside the checkout: the host run refuses it, so the
+    # container run must too, before docker is ever invoked.
+    inside = _denylist(tmp_path / "checkout" / ".superpowers" / "denylist.yaml")
+    result, args = run_check_docker(tmp_path, {"PUBLISHABILITY_TERMS_FILE": str(inside)})
+    assert result.returncode != 0
+    assert "inside the repository" in result.stderr
+    assert "run" not in args
+    assert str(inside) not in result.stderr
+
+
+def test_check_docker_refuses_a_symlinked_denylist(tmp_path):
+    real = _denylist(tmp_path / "elsewhere" / "denylist.yaml")
+    link = tmp_path / "link.yaml"
+    link.symlink_to(real)
+    result, args = run_check_docker(tmp_path, {"PUBLISHABILITY_TERMS_FILE": str(link)})
+    assert result.returncode != 0
+    assert "not a symlink" in result.stderr
+    assert "run" not in args
+
+
+def test_check_docker_mounts_a_valid_external_denylist(tmp_path):
+    outside = _denylist(tmp_path / "elsewhere" / "denylist.yaml")
+    result, args = run_check_docker(tmp_path, {"PUBLISHABILITY_TERMS_FILE": str(outside)})
+    assert result.returncode == 0, result.stderr
+    mounts = [b for a, b in zip(args, args[1:]) if a == "--mount"]
+    assert any(m.endswith("target=/run/publishability/denylist.yaml,readonly") for m in mounts)
