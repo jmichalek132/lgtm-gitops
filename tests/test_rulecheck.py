@@ -1318,3 +1318,12 @@ def test_codeowners_witnesses_cover_every_zero_or_one_directory_combination():
         f"a/x/{rulecheck.CODEOWNERS_PROBE}/b",
         f"a/{rulecheck.CODEOWNERS_PROBE}/x/{rulecheck.CODEOWNERS_PROBE}/b",
     ])
+
+
+@pytest.mark.parametrize("name", ["checkout-.yaml", "-checkout.yaml"])
+def test_layout_rejects_a_filename_stem_starting_or_ending_in_a_hyphen(tmp_path, name):
+    # 'checkout-.yaml' renders ConfigMap 'platform-payments-mimir-checkout-',
+    # which is not a DNS-1123 subdomain, so the API server rejects it at sync.
+    write(tmp_path, f"rules/payments/mimir/{name}")
+    findings = rulecheck.check_layout(tmp_path)
+    assert any("filename" in f for f in findings)

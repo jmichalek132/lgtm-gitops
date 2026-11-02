@@ -117,7 +117,8 @@ Subfolders below the target level are permitted for grouping, for example
 - Alerts: `<service>[-<type>]-alerts.yaml`
 - Recording rules: `<service>-rules.yaml`
 - Unit tests: `<service>-alerts-tests.yaml`
-- Filenames must match `^[a-z0-9-]+\.yaml$`.
+- Filenames must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.yaml$`: the stem
+  becomes the tail of a ConfigMap name, which cannot start or end with `-`.
 - Every team and grouping directory segment must match
   `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` and be at most 63 bytes.
 - Generated ConfigMap names and data keys must each be at most 253 bytes. The
