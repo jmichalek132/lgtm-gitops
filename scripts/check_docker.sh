@@ -17,6 +17,11 @@ cd "$(dirname "$0")/.."
 docker build --quiet -t observability-rules-check . >/dev/null
 
 run_args=(--rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work" -w /work)
+# The dashboard uid-change check reads BASE_REF; without it rulecheck skips
+# that check, so a host BASE_REF must reach the container.
+if [ -n "${BASE_REF:-}" ]; then
+  run_args+=(-e "BASE_REF=$BASE_REF")
+fi
 if [ -n "${PUBLISHABILITY_TERMS_FILE:-}" ]; then
   run_args+=(-v "$PUBLISHABILITY_TERMS_FILE:/run/publishability/denylist.yaml:ro")
   run_args+=(-e PUBLISHABILITY_TERMS_FILE=/run/publishability/denylist.yaml)
