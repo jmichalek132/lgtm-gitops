@@ -695,6 +695,35 @@ ENV_ANY_RE = re.compile(
 # with = selects nothing and must be reported, not accepted.
 ENV_CANONICAL_EQ_RE = re.compile(r'deployment_environment="([a-z]+)"')
 ENV_CANONICAL_RE = re.compile(r'deployment_environment=~"([a-z|]+)"')
+# Spellings the parser accepts and plain text matching cannot see, verified
+# with promtool 3.1.0 (the CI pin): a '#' comment between label and operator
+# (the parser skips it, so the matcher is invisible here), and an escape inside
+# a quoted label name ("deployment_\x65nvironment" decodes to
+# deployment_environment). Strings are matched before comments so a '#'
+# inside a string is never taken for one. These are the second and third
+# bypasses of the regex approach; section 4 of the design names the second as
+# the trigger to move to a real parser.
+_STRING_OR_COMMENT_RE = re.compile(
+    r'''"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`|(?P<comment>#[^\n]*)'''
+)
+# Anchored to a selector position ('{' or ',' before the name): a LogQL line
+# filter chain such as |~ "a\\s+b" != "c" also puts a backslash-bearing string
+# before an operator, and must not be read as a label name.
+ENV_ESCAPED_NAME_RE = re.compile(
+    r'''[{,]\s*(?:"[^"\n]*\\[^"\n]*"|'[^'\n]*\\[^'\n]*')\s*(?:=~|!~|!=|=)'''
+)
+# LogQL stages that WRITE the label: '| label_format deployment_environment="prod"'
+# relabels every environment as prod, so reading it as a selector is wrong.
+ENV_LOGQL_WRITE_RE = re.compile(
+    r'''\|\s*(?:label_format|json|logfmt)\b[^|]*?(?<![a-zA-Z0-9_])deployment_environment\s*='''
+)
+
+
+def _strip_comments(expr: str) -> str:
+    """Blank every '#' comment outside a string literal, keeping strings intact."""
+    return _STRING_OR_COMMENT_RE.sub(
+        lambda m: " " if m.group("comment") else m.group(0), expr
+    )
 
 
 def iter_expressions(root: Path):
@@ -724,6 +753,19 @@ def check_env_matchers(root: Path) -> list[str]:
     findings: list[str] = []
     for path, name, expr in iter_expressions(root):
         rel = path.relative_to(root)
+        expr = _strip_comments(expr)
+        if ENV_ESCAPED_NAME_RE.search(expr):
+            findings.append(
+                f"{rel}: {name}: a quoted label name contains a backslash escape. The "
+                f"parser decodes it, so its environment matcher cannot be checked; "
+                f"spell label names literally."
+            )
+        if ENV_LOGQL_WRITE_RE.search(expr):
+            findings.append(
+                f"{rel}: {name}: deployment_environment is written by a LogQL "
+                f"label_format/json/logfmt stage. That rewrites the label, it does not "
+                f"select an environment."
+            )
         # finditer, not findall: the pattern has no capture group, so we want the
         # whole matched text of each occurrence in order to compare them literally.
         raw = [m.group(0) for m in ENV_ANY_RE.finditer(expr)]
