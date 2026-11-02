@@ -146,6 +146,16 @@ within a fixed outer test deadline.
 
 ### Gate 2, private term scanner
 
+> **Amendment (2026-11-02).** Gate 2 originally scanned only the files the
+> shared discovery primitive yields, which are read from the working tree. A
+> push publishes objects, not the working tree, so a term committed and then
+> removed in a later commit, a term only in a commit message, and a staged blob
+> edited clean on disk all scanned as clean and were then published. Gate 2 now
+> also scans every commit object, blob and path name reachable from `HEAD` but
+> from no remote-tracking ref, plus every staged blob that differs from its
+> working-tree copy. Findings for these name an object id or an index, never a
+> path. Gate 1 is unchanged: it still scans the working tree only.
+
 The denylist lives **outside the repository**, at a path given by
 `PUBLISHABILITY_TERMS_FILE`:
 
