@@ -235,3 +235,30 @@ def test_ci_sentence_does_not_contradict_a_deliberate_skip(repo_copy):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "CHECKS INCOMPLETE" in out
     assert "CI must never end here" not in out
+
+
+def run_check_docker(tmp_path, env_overrides: dict) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """Run scripts/check_docker.sh from a minimal checkout with a stub docker
+    that records its `run` arguments, NUL-separated, instead of running."""
+    checkout = tmp_path / "checkout"
+    (checkout / "scripts").mkdir(parents=True)
+    wrapper = checkout / "scripts" / "check_docker.sh"
+    shutil.copy2(REPO_ROOT / "scripts" / "check_docker.sh", wrapper)
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "docker").write_text(
+        '#!/bin/sh\nif [ "$1" = run ]; then printf "%s\\0" "$@"; fi\n'
+    )
+    (stub / "docker").chmod(0o755)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PUBLISHABILITY_TERMS_FILE", "BASE_REF")}
+    env["PATH"] = f"{stub}:{env.get('PATH', '')}"
+    env.update(env_overrides)
+    result = subprocess.run(["bash", str(wrapper)], env=env, capture_output=True, text=True)
+    return result, [a for a in result.stdout.split("\0") if a]
+
+
+def test_check_docker_forwards_base_ref(tmp_path):
+    result, args = run_check_docker(tmp_path, {"BASE_REF": "HEAD~1"})
+    assert result.returncode == 0, result.stderr
+    assert any(a == "-e" and b == "BASE_REF=HEAD~1" for a, b in zip(args, args[1:]))
