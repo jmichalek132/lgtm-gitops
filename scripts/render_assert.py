@@ -23,8 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def render(target: str) -> list[dict]:
     out = subprocess.run(
-        ["helm", "template", "t", str(ROOT),
-         "--set", f"target={target}", "--set", "tenant=platform"],
+        # target only, exactly what the ArgoCD Applications override (design
+        # section 7: they must not set tenant). The tenant comes from
+        # values.yaml, so the 253-byte name guard sees the deployed one.
+        ["helm", "template", "t", str(ROOT), "--set", f"target={target}"],
         capture_output=True, text=True,
     )
     if out.returncode != 0:
