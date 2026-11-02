@@ -1249,3 +1249,29 @@ def test_dashboards_fails_when_a_base_blob_cannot_be_read(tmp_path, monkeypatch)
     monkeypatch.setattr(rulecheck.subprocess, "run", fake_run)
     findings = rulecheck.check_dashboards(tmp_path, base_ref="HEAD")
     assert any("uid-change detection did not run" in f for f in findings)
+
+
+@pytest.mark.parametrize("target, expr, writer", [
+    ("loki", """'sum(count_over_time({job="x"} | label_format x="a|b", deployment_environment="prod" [5m])) > 0'""",
+     "label_format"),
+    ("loki", """'sum(count_over_time({job="x"} | regexp "(?P<deployment_environment>\\\\\\\\w+)" [5m])) > 0'""",
+     "regexp/pattern"),
+    ("loki", """'sum(count_over_time({job="x"} | pattern "<_> <deployment_environment> <_>" [5m])) > 0'""",
+     "regexp/pattern"),
+    ("mimir", """'label_replace(up, "deployment_environment", "prod", "", "") == 0'""",
+     "label_replace"),
+    ("mimir", """'label_join(up, "deployment_environment", ",", "job") == 0'""",
+     "label_join"),
+])
+def test_envmatcher_rejects_every_construct_that_writes_the_environment(tmp_path, target, expr, writer):
+    write(tmp_path, f"rules/payments/{target}/a-alerts.yaml", expr_rule(expr))
+    findings = rulecheck.check_env_matchers(tmp_path)
+    assert any("is written by" in f and writer in f for f in findings), findings
+
+
+def test_envmatcher_accepts_label_replace_reading_the_environment(tmp_path):
+    # deployment_environment as label_replace's SOURCE label (argument 3) is a
+    # read, not a write.
+    write(tmp_path, "rules/payments/mimir/a-alerts.yaml", expr_rule(
+        """'label_replace(up, "env", "$1", "deployment_environment", "(.*)") == 0'"""))
+    assert rulecheck.check_env_matchers(tmp_path) == []
