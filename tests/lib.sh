@@ -13,9 +13,14 @@ fail() {
   [ -n "${2:-}" ] && printf '       %s\n' "$2"
 }
 
+# grep reads ALL of its input in these helpers, never -q: under `set -o
+# pipefail`, -q exits at the first match, printf then dies of SIGPIPE on any
+# haystack bigger than the pipe buffer, and the pipeline reports failure for a
+# needle that is present. That inverted assert_contains and assert_not_contains
+# on large renders.
 assert_contains() {
   local haystack="$1" needle="$2" name="$3"
-  if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+  if printf '%s' "$haystack" | grep -F -- "$needle" >/dev/null; then
     pass "$name"
   else
     fail "$name" "expected to find: $needle"
@@ -24,7 +29,7 @@ assert_contains() {
 
 assert_not_contains() {
   local haystack="$1" needle="$2" name="$3"
-  if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+  if printf '%s' "$haystack" | grep -F -- "$needle" >/dev/null; then
     fail "$name" "expected NOT to find: $needle"
   else
     pass "$name"
@@ -73,7 +78,7 @@ assert_fails_with() {
   output=$("$@" 2>&1) && status=0 || status=$?
   if [ "$status" -eq 0 ]; then
     fail "$name" "expected failure, but command succeeded"
-  elif printf '%s' "$output" | grep -qF -- "$expected"; then
+  elif printf '%s' "$output" | grep -F -- "$expected" >/dev/null; then
     pass "$name"
   else
     fail "$name" "failed as expected but message lacked: $expected"
