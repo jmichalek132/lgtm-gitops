@@ -1090,44 +1090,65 @@ def codeowners_pattern_regex(pattern: str) -> re.Pattern[str] | None:
         return None
 
     body = pattern[1:]
-    if not body:
+    if not body or "***" in body:
         return None
 
+    # Segment-wise, as gitignore and hmarr/codeowners buildPatternRegex do:
+    # '**' is special only as a WHOLE segment, and a middle '/**/' matches
+    # ZERO or more directories, so '/a/**/b' owns 'a/b'. A '**' embedded in a
+    # segment is two ordinary stars and never crosses '/'.
+    segs = body.split("/")
+    if len(segs) > 1 and segs[-1] == "":
+        segs[-1] = "**"  # a trailing slash is '/**': everything beneath
     out: list[str] = []
-    i = 0
-    while i < len(body):
-        if body.startswith("**", i):
-            out.append(".*")
-            i += 2
-        elif body[i] == "*":
-            out.append("[^/]*")
-            i += 1
+    need_slash = False
+    last = len(segs) - 1
+    for i, seg in enumerate(segs):
+        if seg == "**":
+            if i == 0 and i == last:
+                out.append(".+")
+            elif i == 0:
+                out.append("(?:.+/)?")
+            elif i == last:
+                out.append("/.*")
+            else:
+                out.append("(?:/.+)?")
+            need_slash = i != 0
+            continue
+        if need_slash:
+            out.append("/")
+        if seg == "*":
+            out.append("[^/]+")
         else:
-            out.append(re.escape(body[i]))
-            i += 1
-    translated = "".join(out)
-
-    # A trailing slash marks a directory: it owns everything beneath, not itself.
-    if body.endswith("/"):
-        return re.compile(rf"^{translated}.+$")
-    last_seg = body.rsplit("/", 1)[-1]
-    if last_seg in ("*", "**"):
-        return re.compile(rf"^{translated}$")
-    # No trailing slash: matches the path AND everything beneath it (a pattern
-    # naming a directory claims its contents). hmarr/codeowners match.go:172.
-    return re.compile(rf"^{translated}(?:/.*)?$")
+            out.append("".join("[^/]*" if c == "*" else re.escape(c) for c in seg))
+            if i == last:
+                # No trailing slash: the path AND everything beneath it (a
+                # pattern naming a directory claims its contents).
+                # hmarr/codeowners match.go:172.
+                out.append("(?:/.*)?")
+        need_slash = True
+    return re.compile("^" + "".join(out) + "$")
 
 
-def codeowners_pattern_witness(pattern: str) -> str | None:
-    """A concrete path the pattern matches, used to probe patterns for paths that
+def codeowners_pattern_witnesses(pattern: str) -> list[str]:
+    """Concrete paths the pattern matches, used to probe patterns for paths that
     do not exist yet. A CODEOWNERS line takes effect the moment someone adds the
-    file it names, so the line itself is evidence and must be evaluated now."""
+    file it names, so the line itself is evidence and must be evaluated now.
+    '/**/' matches zero directories as well as one, so both are witnessed."""
     if pattern == "*" or not pattern.startswith("/"):
-        return None
-    witness = pattern[1:].replace("**", CODEOWNERS_PROBE).replace("*", CODEOWNERS_PROBE)
-    if witness.endswith("/"):
-        witness += CODEOWNERS_PROBE
-    return witness or None
+        return []
+    body = pattern[1:]
+    variants = {body, body.replace("/**/", "/")}
+    if body.startswith("**/"):
+        variants.add(body[3:])
+    witnesses = []
+    for variant in sorted(variants):
+        w = variant.replace("**", CODEOWNERS_PROBE).replace("*", CODEOWNERS_PROBE)
+        if w.endswith("/"):
+            w += CODEOWNERS_PROBE
+        if w:
+            witnesses.append(w)
+    return witnesses
 
 
 # Directories whose contents are build or tool droppings rather than repository
@@ -1168,9 +1189,9 @@ def governed_probe_paths(root: Path, entry: str, patterns: list[str]) -> list[st
         prefix = None
 
     for pattern in patterns:
-        witness = codeowners_pattern_witness(pattern)
-        if witness and prefix and witness.startswith(prefix):
-            probes.add(witness)
+        for witness in codeowners_pattern_witnesses(pattern):
+            if prefix and witness.startswith(prefix):
+                probes.add(witness)
 
     return sorted(probes)
 
