@@ -150,16 +150,16 @@ groups:
     assert any("runbook_url" in f for f in findings)
 
 
-def test_contract_rejects_duplicate_alert_names_across_teams(tmp_path):
+def test_contract_accepts_the_same_alert_name_in_two_teams(tmp_path):
+    # Names need not be unique: owner always disambiguates (README).
     write(tmp_path, "rules/payments/mimir/a-alerts.yaml",
           ALERT.format(name="SharedName", severity="warning", owner="payments"))
     write(tmp_path, "rules/fraud/mimir/b-alerts.yaml",
           ALERT.format(name="SharedName", severity="warning", owner="fraud"))
-    findings = rulecheck.check_contract(tmp_path)
-    assert any("SharedName" in f and "unique" in f for f in findings)
+    assert rulecheck.check_contract(tmp_path) == []
 
 
-def test_contract_rejects_duplicate_alert_names_within_one_file(tmp_path):
+def test_contract_accepts_the_same_alert_name_twice_in_one_file(tmp_path):
     write(tmp_path, "rules/payments/mimir/a-alerts.yaml", """\
 groups:
   - name: g
@@ -173,8 +173,7 @@ groups:
         labels: {severity: warning, owner: payments}
         annotations: {summary: Two., runbook_url: https://runbooks.internal/x}
 """)
-    findings = rulecheck.check_contract(tmp_path)
-    assert any("SameName" in f and "unique" in f for f in findings)
+    assert rulecheck.check_contract(tmp_path) == []
 
 
 def test_contract_survives_malformed_labels(tmp_path):

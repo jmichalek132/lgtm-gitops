@@ -514,7 +514,6 @@ def iter_alerts(root: Path):
 
 def check_contract(root: Path) -> list[str]:
     findings: list[str] = []
-    seen_names: dict[str, Path] = {}
 
     for path in rule_files(root):
         if path.name.endswith("-tests.yaml") or path.is_symlink():
@@ -558,16 +557,9 @@ def check_contract(root: Path) -> list[str]:
                 f"{rel}: alert {name}: needs one of {', '.join(URL_ANNOTATIONS)}"
             )
 
-        # No `!= path` guard: two alerts sharing a name inside ONE file are just
-        # as indistinguishable to Alertmanager as two in different files.
-        if name in seen_names:
-            findings.append(
-                f"{rel}: alert name '{name}' is not unique; also defined in "
-                f"{seen_names[name].relative_to(root)}. Alerts carry no namespace label, "
-                f"so duplicates are indistinguishable to Alertmanager."
-            )
-        else:
-            seen_names[name] = path
+        # Alert names are deliberately NOT required to be unique (README):
+        # routing, silences and queries always combine the name with other
+        # labels, `owner` at minimum, never the name alone.
 
     return findings
 
