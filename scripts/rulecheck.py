@@ -16,6 +16,7 @@ human-readable findings. An empty list means the check passed.
 
 from __future__ import annotations
 
+import ast
 import glob
 import json
 import multiprocessing
@@ -714,6 +715,8 @@ ENV_ESCAPED_NAME_RE = re.compile(
 )
 # LogQL stages that WRITE the label: '| label_format deployment_environment="prod"'
 # relabels every environment as prod, so reading it as a selector is wrong.
+# Applied to the string-blanked expression (env_label_writes), so a '|'
+# inside an earlier string argument cannot end the stage early.
 ENV_LOGQL_WRITE_RE = re.compile(
     r'''\|\s*(?:label_format|json|logfmt)\b[^|]*?(?<![a-zA-Z0-9_])deployment_environment\s*='''
 )
@@ -724,6 +727,74 @@ def _strip_comments(expr: str) -> str:
     return _STRING_OR_COMMENT_RE.sub(
         lambda m: " " if m.group("comment") else m.group(0), expr
     )
+
+
+_STRING_RE = re.compile(r'''"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`''')
+_CALL_NAME_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*$")
+_LOGQL_CAPTURE_STAGE_RE = re.compile(r"\|\s*(?:regexp|pattern)\s*$")
+# PromQL functions whose argument 1 (0-based) is the label they WRITE.
+_LABEL_WRITING_CALLS = ("label_replace", "label_join")
+
+
+def _blank_strings(expr: str) -> str:
+    """The same expression, the same length, with every string literal's
+    contents replaced by spaces, so pipes, commas and parentheses can be read
+    as syntax without one inside a string being mistaken for it."""
+    return _STRING_RE.sub(
+        lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1], expr
+    )
+
+
+def _string_value(literal: str) -> str | None:
+    """Decode a PromQL/LogQL string literal; None if it does not decode."""
+    if literal.startswith("`"):
+        return literal[1:-1]
+    try:
+        value = ast.literal_eval(literal)
+    except (SyntaxError, ValueError):
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _call_argument(blank: str, pos: int) -> tuple[str, int] | None:
+    """(function name, 0-based argument index) of the call whose argument list
+    holds position `pos` of a string-blanked expression, or None."""
+    depth = 0
+    commas = 0
+    for i in range(pos - 1, -1, -1):
+        c = blank[i]
+        if c in ")]}":
+            depth += 1
+        elif c in "([{":
+            if depth == 0:
+                if c != "(":
+                    return None
+                name = _CALL_NAME_RE.search(blank[:i])
+                return (name.group(1), commas) if name else None
+            depth -= 1
+        elif c == "," and depth == 0:
+            commas += 1
+    return None
+
+
+def env_label_writes(expr: str) -> list[str]:
+    """Every construct in a comment-stripped expression that WRITES
+    deployment_environment rather than selecting on it, as a description."""
+    blank = _blank_strings(expr)
+    writes: list[str] = []
+    if ENV_LOGQL_WRITE_RE.search(blank):
+        writes.append("a LogQL label_format/json/logfmt stage")
+    for m in _STRING_RE.finditer(expr):
+        value = _string_value(m.group(0))
+        if value is None:
+            continue
+        if "<deployment_environment>" in value and _LOGQL_CAPTURE_STAGE_RE.search(blank[:m.start()]):
+            writes.append("a LogQL regexp/pattern capture")
+        if value == "deployment_environment":
+            call = _call_argument(blank, m.start())
+            if call and call[0] in _LABEL_WRITING_CALLS and call[1] == 1:
+                writes.append(f"PromQL {call[0]}")
+    return sorted(set(writes))
 
 
 def iter_expressions(root: Path):
@@ -760,11 +831,10 @@ def check_env_matchers(root: Path) -> list[str]:
                 f"parser decodes it, so its environment matcher cannot be checked; "
                 f"spell label names literally."
             )
-        if ENV_LOGQL_WRITE_RE.search(expr):
+        for write in env_label_writes(expr):
             findings.append(
-                f"{rel}: {name}: deployment_environment is written by a LogQL "
-                f"label_format/json/logfmt stage. That rewrites the label, it does not "
-                f"select an environment."
+                f"{rel}: {name}: deployment_environment is written by {write}. That "
+                f"rewrites the label, it does not select an environment."
             )
         # finditer, not findall: the pattern has no capture group, so we want the
         # whole matched text of each occurrence in order to compare them literally.
