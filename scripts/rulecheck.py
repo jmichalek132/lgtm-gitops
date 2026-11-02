@@ -132,10 +132,23 @@ def load_publishability_config(root: Path) -> list[dict]:
                 f"pattern {pid} message must contain no line break or control character"
             )
         try:
-            compiled = re.compile(regex)
+            re.compile(regex)
         except re.error as exc:
             raise PublishabilityConfigError(f"pattern {pid} regex does not compile: {exc}") from exc
-        if compiled.search(""):
+        # Under the same killable deadline as every file match: a pattern can
+        # backtrack catastrophically on the empty string too, and run in this
+        # process it would hang the check the deadline exists to bound.
+        status, matches = _search_with_deadline(regex, "", PUBLISHABILITY_DEADLINE_SECONDS)
+        if status == "timeout":
+            raise PublishabilityConfigError(
+                f"pattern {pid} regex exceeded its {PUBLISHABILITY_DEADLINE_SECONDS}s matching "
+                f"deadline while being checked against the empty string"
+            )
+        if status != "ok":
+            raise PublishabilityConfigError(
+                f"pattern {pid} regex could not be checked against the empty string"
+            )
+        if matches:
             raise PublishabilityConfigError(f"pattern {pid} regex matches the empty string")
         if pid in seen_ids:
             raise PublishabilityConfigError(f"pattern ids must be unique, {pid!r} repeats")

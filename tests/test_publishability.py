@@ -448,3 +448,36 @@ def test_shipped_patterns_ignore_a_bare_directory_name():
     patterns = [re.compile(p["regex"]) for p in load_publishability_config(REPO_ROOT)]
     for text in ("the Users table", "go home/", "/" + "Users/", "/" + "home/ "):
         assert not any(p.search(text) for p in patterns), text
+
+
+def test_empty_string_validation_runs_under_the_killable_deadline(tmp_path):
+    # Catastrophic on the empty string itself: run in the loading process it
+    # hung the whole check, past the documented 1.0s deadline.
+    import subprocess
+    import sys
+
+    write_config(
+        tmp_path,
+        "version: 1\n"
+        "patterns: [{id: evil-empty, regex: '(?:a?|a?){35}(?=a)', message: probe}]\n",
+    )
+    program = textwrap.dedent(
+        f'''
+        from pathlib import Path
+        from scripts.rulecheck import check_publishability
+
+        if __name__ == "__main__":
+            findings = check_publishability(Path({str(tmp_path)!r}))
+            assert len(findings) == 1, findings
+            assert "evil-empty" in findings[0] and "deadline" in findings[0], findings
+        '''
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=REPO_ROOT,
+        env={**__import__("os").environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
