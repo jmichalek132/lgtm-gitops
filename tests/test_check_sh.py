@@ -297,3 +297,30 @@ def test_check_docker_mounts_a_valid_external_denylist(tmp_path):
     assert result.returncode == 0, result.stderr
     mounts = [b for a, b in zip(args, args[1:]) if a == "--mount"]
     assert any(m.endswith("target=/run/publishability/denylist.yaml,readonly") for m in mounts)
+
+
+def test_shell_assertions_handle_output_larger_than_the_pipe_buffer():
+    script = r'''
+set -uo pipefail
+. tests/lib.sh
+
+payload=$(printf 'NEEDLE\n'; printf '%1000000s' '')
+assert_contains "$payload" NEEDLE 'required marker' >/dev/null
+[ "$PASSES" -eq 1 ] && [ "$FAILURES" -eq 0 ] || exit 91
+
+assert_not_contains "$payload" NEEDLE 'forbidden marker' >/dev/null
+[ "$PASSES" -eq 1 ] && [ "$FAILURES" -eq 1 ] || exit 92
+
+large_failure() {
+  printf 'NEEDLE\n'
+  printf '%1000000s' ''
+  return 1
+}
+
+assert_fails_with NEEDLE 'expected diagnostic' large_failure >/dev/null
+[ "$PASSES" -eq 2 ] && [ "$FAILURES" -eq 1 ] || exit 93
+'''
+    result = subprocess.run(
+        ["bash", "-c", script], cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
