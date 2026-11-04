@@ -1188,6 +1188,8 @@ def codeowners_pattern_regex(pattern: str) -> re.Pattern[str] | None:
     # matches ZERO or more directories, so '/a/**/b' owns 'a/b'. A '**'
     # embedded in a segment is two ordinary stars and never crosses '/'.
     segs = _codeowners_segments(body)
+    if _too_many_doublestars(segs):
+        return None
     out: list[str] = []
     need_slash = False
     last = len(segs) - 1
@@ -1241,6 +1243,17 @@ def _codeowners_segments(body: str) -> list[str]:
     return collapsed
 
 
+# Each leading or middle '**' doubles the witness set (zero directories or
+# one), so the expansion is bounded: past this many, a pattern is reported as
+# unevaluable instead of enumerated. 12 is 4096 witnesses; real CODEOWNERS
+# lines use one or two.
+MAX_CODEOWNERS_DOUBLESTARS = 12
+
+
+def _too_many_doublestars(segs: list[str]) -> bool:
+    return sum(seg == "**" for seg in segs[:-1]) > MAX_CODEOWNERS_DOUBLESTARS
+
+
 def codeowners_pattern_witnesses(pattern: str) -> list[str]:
     """Concrete paths the pattern matches, used to probe patterns for paths that
     do not exist yet. A CODEOWNERS line takes effect the moment someone adds the
@@ -1253,6 +1266,8 @@ def codeowners_pattern_witnesses(pattern: str) -> list[str]:
     if pattern == "*" or not pattern.startswith("/") or not pattern[1:]:
         return []
     segs = _codeowners_segments(pattern[1:])
+    if _too_many_doublestars(segs):
+        return []
     last = len(segs) - 1
     choices: list[list[str | None]] = []
     for i, seg in enumerate(segs):
