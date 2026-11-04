@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import render_assert
 
@@ -167,3 +169,16 @@ def test_main_rejects_a_wrong_routing_label(monkeypatch, tmp_path, capsys):
     docs = {"mimir": [cm("platform-a", a, target="loki")]}
     assert run_main(monkeypatch, tmp_path, docs, {a}) == 1
     assert "routing label" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("char, expected", [
+    ("é", 0),  # 90 KB as Go writes it; Python's default escaping made it 270 KB
+    ("<", 1),       # 270 KB as Go writes it (<); Python's default counted 45 KB
+    (">", 1),
+    ("&", 1),
+])
+def test_main_sizes_the_annotation_as_go_json_writes_it(monkeypatch, tmp_path, char, expected):
+    a = "rules/p/mimir/a-alerts.yaml"
+    payload = "#" + char * 45000 + "\ngroups: []\n"
+    docs = {"mimir": [cm("platform-a", a, payload)]}
+    assert run_main(monkeypatch, tmp_path, docs, {a}, content=payload) == expected
