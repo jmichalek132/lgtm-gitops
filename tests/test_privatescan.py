@@ -982,3 +982,46 @@ def test_history_already_on_a_remote_is_not_rescanned(tmp_path):
     subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], cwd=repo, check=True)
     subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
     assert scan_repository(repo, [{"id": "private-term-01", "value": TERM}]) == []
+
+
+def _hermetic_git(monkeypatch):
+    # The host's global git config (commit signing, hooks) must not reach
+    # these repositories.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_GRAFT_FILE"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("mask", ["replace-blob", "replace-commit", "graft"])
+def test_history_scan_reads_original_objects(tmp_path, monkeypatch, mask):
+    """A replace ref or a graft changes what local reads see, not what a push
+    sends, so neither may hide the original blob from the scan."""
+    _hermetic_git(monkeypatch)
+    repo = _git_repo(tmp_path)
+    (repo / "a.txt").write_text(TERM + "\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _commit(repo, "-m", "initial")
+    bad_commit = _git(repo, "rev-parse", "HEAD")
+    bad_blob = _git(repo, "rev-parse", "HEAD:a.txt")
+    (repo / "a.txt").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _commit(repo, "-m", "scrub")
+
+    if mask == "replace-blob":
+        _git(repo, "replace", bad_blob, _git(repo, "rev-parse", "HEAD:a.txt"))
+    elif mask == "replace-commit":
+        _git(repo, "replace", bad_commit, _git(repo, "commit-tree", "HEAD^{tree}", "-m", "clean root"))
+    else:
+        (repo / ".git" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "info" / "grafts").write_text(_git(repo, "rev-parse", "HEAD") + "\n", encoding="ascii")
+
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
+    assert any(f.startswith(f"blob {bad_blob}: private-term-01") for f in findings), findings
