@@ -77,6 +77,20 @@ def source_findings(expected: set[str], rendered: set[str]) -> list[str]:
     return findings
 
 
+def go_json_size(doc: dict) -> int:
+    """Bytes of `doc` as Go's encoding/json writes it, which is what the
+    last-applied-configuration annotation holds. Python's default differs both
+    ways: it escapes every non-ASCII character (6 bytes for a 2-byte UTF-8
+    'é') and leaves '<', '>' and '&' alone, which Go escapes to 6 bytes each.
+    '>' and '<' are common in PromQL, so the default undercounted rule files.
+    Go also escapes U+2028/U+2029 and ends the encoding with a newline."""
+    text = json.dumps(doc, ensure_ascii=False, separators=(",", ":"))
+    for char, escaped in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"),
+                          ("\u2028", "\\u2028"), ("\u2029", "\\u2029")):
+        text = text.replace(char, escaped)
+    return len(text.encode("utf-8")) + 1
+
+
 def _normalised(text: str) -> str:
     # The template embeds the file as a `|-` block scalar: YAML folds CRLF to LF
     # and strip chomping drops trailing line breaks, so compare on that basis.
@@ -140,7 +154,7 @@ def main() -> int:
                 rendered_sources.add(source)
                 findings.extend(delivery_findings(name, target, source, doc))
 
-            applied = len(json.dumps(doc, separators=(",", ":")).encode())
+            applied = go_json_size(doc)
             if applied > LAST_APPLIED_LIMIT - HEADROOM:
                 findings.append(
                     f"{name}: {applied} bytes as JSON. Client-side apply copies that into "
