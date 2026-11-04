@@ -644,21 +644,34 @@ def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
         names = sorted({n.decode("utf-8", "surrogateescape") for n in logged.split(b"\0") if n.strip()})
         # `diff-files --raw -z`: ":<mode> <mode> <index sha> <worktree sha> <status>\0<path>\0".
         # A non-zero index sha is a staged blob whose working-tree copy differs.
-        diff = git("diff-files", "-z", "--raw", "--no-abbrev").split(b"\0")
-        modified_paths = set(diff[1::2])
-        for meta in diff[0::2]:
+        for meta in git("diff-files", "-z", "--raw", "--no-abbrev").split(b"\0")[0::2]:
             fields = meta.split(b" ")
             if len(fields) == 5 and fields[2].strip(b"0"):
                 wanted[fields[2]] = None
-        # A blob staged at a path whose working-tree copy is unmodified has
-        # the same bytes iter_scannable_files already read from disk, so it is
-        # skipped here rather than scanned twice. On a branch this is most of
-        # the HEAD versions, which are the largest blobs.
-        for entry in git("ls-files", "-s", "-z").split(b"\0"):
+        # A clean diff-files status does not prove the bytes iter_scannable_files
+        # read from disk are the index blob: skip-worktree and assume-unchanged
+        # hide a changed copy, and a clean/smudge filter makes the two differ by
+        # design. Those paths' index blobs are read directly. Every blob of an
+        # unpushed commit is scanned regardless, even if it equals a file on
+        # disk, because a clean status cannot vouch for it either.
+        # `ls-files -v -s`: "<tag> <mode> <sha> <stage>\t<path>"; a lowercase
+        # tag is assume-unchanged, S is skip-worktree.
+        index = [e for e in git("ls-files", "-v", "-s", "-z").split(b"\0") if e]
+        paths = [e.partition(b"\t")[2] for e in index]
+        attrs = git(
+            "check-attr", "-z", "--stdin", "filter", data=b"".join(q + b"\0" for q in paths)
+        ).split(b"\0") if paths else []
+        filtered = {
+            attrs[i] for i in range(0, len(attrs) - 2, 3)
+            if attrs[i + 2] not in (b"unspecified", b"unset")
+        }
+        for entry in index:
             meta, _, path = entry.partition(b"\t")
             fields = meta.split(b" ")
-            if len(fields) == 3 and path not in modified_paths:
-                wanted.pop(fields[1], None)
+            if len(fields) != 4 or fields[1] == b"160000":  # 160000: a gitlink
+                continue
+            if fields[0].islower() or fields[0] == b"S" or path in filtered:
+                wanted[fields[2]] = None
         batch = git("cat-file", "--batch", data=b"".join(s + b"\n" for s in wanted)) if wanted else b""
     except (subprocess.CalledProcessError, OSError) as exc:
         yield REPO_MARKER, DiscoveryFinding(
