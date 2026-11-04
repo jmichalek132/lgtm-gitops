@@ -1319,10 +1319,19 @@ def governed_probe_paths(root: Path, entry: str, patterns: list[str]) -> list[st
         probes = {rel_path}
         prefix = None
 
+    # A witness substitutes probes for wildcards without regard to the entry,
+    # so '/**/new.py' witnesses 'new.py' and '<probe>/new.py', neither under
+    # 'scripts/', although the pattern owns a future 'scripts/new.py'. Each
+    # suffix of each witness is therefore also tried under the entry's
+    # prefix, and kept only when the pattern really matches it.
     for pattern in patterns:
+        regex = codeowners_pattern_regex(pattern)
+        if regex is None or not prefix:
+            continue
         for witness in codeowners_pattern_witnesses(pattern):
-            if prefix and witness.startswith(prefix):
-                probes.add(witness)
+            parts = witness.split("/")
+            candidates = {witness} | {prefix + "/".join(parts[i:]) for i in range(len(parts))}
+            probes.update(c for c in candidates if c.startswith(prefix) and regex.fullmatch(c))
 
     return sorted(probes)
 

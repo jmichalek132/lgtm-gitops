@@ -1358,3 +1358,13 @@ def test_codeowners_reports_an_oversized_pattern_as_unevaluable(tmp_path):
                + "/scripts/" + "**/x/" * 40 + "end.py @org/payments\n")
     findings = rulecheck.check_codeowners(tmp_path)
     assert any("cannot be evaluated" in f for f in findings)
+
+
+@pytest.mark.parametrize("pattern", ["/**/not-created-yet.py", "/scr*/not-created-yet.py"])
+def test_codeowners_future_path_probe_lands_under_the_governed_entry(tmp_path, pattern):
+    # Both patterns own a future scripts/not-created-yet.py, and neither
+    # witness starts with 'scripts/'.
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES + f"{pattern} @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("scripts/not-created-yet.py" in f and "@org/payments" in f for f in findings)
