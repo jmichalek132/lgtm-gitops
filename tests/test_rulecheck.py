@@ -1337,3 +1337,24 @@ def test_envmatcher_escape_guard_ignores_text_inside_a_string(tmp_path, target, 
     # selector; only whole string tokens in selector position are label names.
     write(tmp_path, f"rules/payments/{target}/a-alerts.yaml", expr_rule(expr))
     assert rulecheck.check_env_matchers(tmp_path) == []
+
+
+def test_codeowners_bounds_witness_expansion(monkeypatch):
+    # 40 middle '**' segments would be 2**40 witnesses; the pattern must be
+    # reported as unevaluable before any enumeration starts.
+    pattern = "/scripts/" + "**/x/" * 40 + "end.py"
+
+    def forbidden_product(*args, **kwargs):
+        raise AssertionError("oversized pattern reached witness enumeration")
+
+    monkeypatch.setattr(rulecheck.itertools, "product", forbidden_product)
+    assert rulecheck.codeowners_pattern_regex(pattern) is None
+    assert rulecheck.codeowners_pattern_witnesses(pattern) == []
+
+
+def test_codeowners_reports_an_oversized_pattern_as_unevaluable(tmp_path):
+    governed_repo(tmp_path)
+    codeowners(tmp_path, CODEOWNERS_HEADER + TEAM_ENTRIES
+               + "/scripts/" + "**/x/" * 40 + "end.py @org/payments\n")
+    findings = rulecheck.check_codeowners(tmp_path)
+    assert any("cannot be evaluated" in f for f in findings)
