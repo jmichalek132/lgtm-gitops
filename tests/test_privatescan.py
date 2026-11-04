@@ -1025,3 +1025,26 @@ def test_history_scan_reads_original_objects(tmp_path, monkeypatch, mask):
 
     findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
     assert any(f.startswith(f"blob {bad_blob}: private-term-01") for f in findings), findings
+
+
+@pytest.mark.parametrize("where", ["message", "name"])
+def test_local_tags_are_scanned(tmp_path, monkeypatch, where):
+    """push.followTags sends annotated tags along with a branch push, and
+    `git push --tags` sends every tag, so tag messages and names count."""
+    _hermetic_git(monkeypatch)
+    repo = _git_repo(tmp_path)
+    (repo / "a.txt").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _commit(repo, "-m", "initial")
+    if where == "message":
+        _git(repo, "tag", "-a", "v1", "-m", f"release {TERM}")
+    else:
+        _git(repo, "tag", f"{TERM}-1")
+
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
+    if where == "message":
+        oid = _git(repo, "rev-parse", "v1")
+        assert any(f.startswith(f"tag {oid}: private-term-01") for f in findings), findings
+    else:
+        assert any(f.startswith("tag name #") and "private-term-01" in f for f in findings), findings
+    assert all(TERM not in f for f in findings)

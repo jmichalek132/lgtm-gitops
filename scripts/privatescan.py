@@ -591,9 +591,10 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
 def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
     """Yield (label, text) for what the next push publishes beyond the
     working tree: every commit object (message and author lines) and blob
-    reachable from HEAD but from no remote-tracking ref, every path name
-    those objects were recorded under, and the staged blob of every path
-    whose working-tree copy differs from the index.
+    reachable from HEAD or a local tag but from no remote-tracking ref, every
+    path name those commits recorded, every local tag object and tag name,
+    and the staged blob of every path whose working-tree copy differs from
+    the index.
 
     iter_scannable_files reads the WORKING TREE, so on its own a term that
     was committed and then removed in a later commit, a term that appears
@@ -621,7 +622,13 @@ def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
             ["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD"],
             capture_output=True, env=git_env,
         ).returncode == 0
-        listing = git("rev-list", "--objects", "HEAD", "--not", "--remotes") if born else b""
+        # Tags: an annotated tag reachable from a pushed commit travels with a
+        # branch push under push.followTags, and `git push --tags` sends them
+        # all. Tag objects are reachable from no remote-tracking ref, so every
+        # local tag object is scanned (they are small), plus every tag NAME.
+        tag_refs = git("for-each-ref", "--format=%(refname)", "refs/tags").splitlines()
+        revisions = (["HEAD"] if born else []) + (["--tags"] if tag_refs else [])
+        listing = git("rev-list", "--objects", *revisions, "--not", "--remotes") if revisions else b""
         wanted: dict[bytes, None] = {}
         for line in listing.splitlines():
             wanted[line.partition(b" ")[0]] = None
@@ -632,8 +639,8 @@ def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
         # appear; -m includes what a merge itself introduces.
         logged = git(
             "log", "--format=", "--name-only", "-z", "--no-renames", "-m",
-            "HEAD", "--not", "--remotes",
-        ) if born else b""
+            *revisions, "--not", "--remotes",
+        ) if revisions else b""
         names = sorted({n.decode("utf-8", "surrogateescape") for n in logged.split(b"\0") if n.strip()})
         # `diff-files --raw -z`: ":<mode> <mode> <index sha> <worktree sha> <status>\0<path>\0".
         # A non-zero index sha is a staged blob whose working-tree copy differs.
@@ -660,9 +667,11 @@ def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
         )
         return
 
-    # A path name is labelled by its position, never by the name itself.
+    # A name is labelled by its position, never by the name itself.
     for index, name in enumerate(names, 1):
         yield f"unpushed path name #{index}", name
+    for index, ref in enumerate(sorted(tag_refs), 1):
+        yield f"tag name #{index}", ref.decode("utf-8", "surrogateescape").removeprefix("refs/tags/")
 
     pos = 0
     while pos < len(batch):
@@ -677,7 +686,7 @@ def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
         sha, kind, size = header
         body = batch[nl + 1:nl + 1 + int(size)]
         pos = nl + 2 + int(size)
-        if kind not in (b"commit", b"blob"):
+        if kind not in (b"commit", b"blob", b"tag"):
             continue
         label = f"{kind.decode()} {sha.decode()}"
         if b"\x00" in body:
