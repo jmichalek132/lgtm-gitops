@@ -831,7 +831,7 @@ def test_scan_repository_whole_repo_completes_quickly(monkeypatch):
     This prices the working-tree scan only. The unpushed-object scan reads
     every intermediate version of every file the local branch changed, so
     its cost depends on the branch rather than the tree (measured
-    2026-11-02: 1.0 MiB of unpushed blobs on a 16-commit branch added 47s)
+    2026-11-02: 1.3 MiB of unpushed blobs on a 16-commit branch added 53s)
     and would make this budget a measurement of how much is unpushed."""
     import time
 
@@ -1048,3 +1048,67 @@ def test_local_tags_are_scanned(tmp_path, monkeypatch, where):
     else:
         assert any(f.startswith("tag name #") and "private-term-01" in f for f in findings), findings
     assert all(TERM not in f for f in findings)
+
+
+def _synthetic_filter(repo):
+    """A clean filter that writes TERM into the blob where the working tree
+    says "clean", and a smudge filter that reverses it, so the file on disk
+    never contains the term while the blob git stores does."""
+    import shlex
+
+    def command(before, after):
+        program = f"import sys; sys.stdout.write(sys.stdin.read().replace({before!r}, {after!r}))"
+        return shlex.join([sys.executable, "-c", program])
+
+    _git(repo, "config", "filter.synthetic.clean", command("clean", TERM))
+    _git(repo, "config", "filter.synthetic.smudge", command(TERM, "clean"))
+    (repo / ".gitattributes").write_text("a.txt filter=synthetic\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("mode", ["filter", "assume-unchanged", "skip-worktree"])
+def test_clean_status_does_not_hide_an_unscanned_committed_blob(tmp_path, monkeypatch, mode):
+    _hermetic_git(monkeypatch)
+    repo = _git_repo(tmp_path)
+    if mode == "filter":
+        _synthetic_filter(repo)
+    path = repo / "a.txt"
+    path.write_text("clean\n" if mode == "filter" else TERM + "\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _commit(repo, "-m", "initial")
+    if mode != "filter":
+        path.write_text("clean\n", encoding="utf-8")
+        _git(repo, "update-index", "--" + mode, "a.txt")
+
+    assert _git(repo, "diff-files", "--name-only") == ""
+    assert all(TERM not in text for _, text in iter_scannable_files(repo))
+    oid = _git(repo, "rev-parse", "HEAD:a.txt")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
+    assert any(f.startswith(f"blob {oid}: private-term-01") for f in findings), findings
+
+
+@pytest.mark.parametrize("mode", ["filter", "skip-worktree"])
+def test_clean_status_does_not_hide_an_unscanned_staged_blob(tmp_path, monkeypatch, mode):
+    """Staged, not committed: the blob is in no commit, so only the index
+    names it, and the working tree on disk is clean."""
+    _hermetic_git(monkeypatch)
+    repo = _git_repo(tmp_path)
+    if mode == "filter":
+        _synthetic_filter(repo)
+    path = repo / "a.txt"
+    path.write_text("other\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _commit(repo, "-m", "initial")
+    if mode == "filter":
+        path.write_text("clean\n", encoding="utf-8")  # the clean filter stages TERM
+        _git(repo, "add", "a.txt")
+    else:
+        path.write_text(TERM + "\n", encoding="utf-8")
+        _git(repo, "add", "a.txt")
+        path.write_text("other\n", encoding="utf-8")
+        _git(repo, "update-index", "--skip-worktree", "a.txt")
+
+    assert _git(repo, "diff-files", "--name-only") == ""
+    assert all(TERM not in text for _, text in iter_scannable_files(repo))
+    oid = _git(repo, "rev-parse", ":a.txt")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
+    assert any(f.startswith(f"blob {oid}: private-term-01") for f in findings), findings
