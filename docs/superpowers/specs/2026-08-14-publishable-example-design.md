@@ -100,10 +100,10 @@ other check.
 version: 1
 patterns:
   - id: macos-home-path
-    regex: '(?:[/]|\\[/]|%2[Ff])Users(?:[/]|\\[/]|%2[Ff])[A-Za-z0-9_][A-Za-z0-9._-]*'
+    regex: '(?:[/]|\\[/]|%2[Ff])Users(?:[/]|\\[/]|%2[Ff])[\w.-]+'
     message: "personal absolute path"
   - id: linux-home-path
-    regex: '(?:[/]|\\[/]|%2[Ff])home(?:[/]|\\[/]|%2[Ff])[A-Za-z0-9_][A-Za-z0-9._-]*'
+    regex: '(?:[/]|\\[/]|%2[Ff])home(?:[/]|\\[/]|%2[Ff])[\w.-]+'
     message: "personal absolute path"
 ```
 
