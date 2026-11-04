@@ -630,10 +630,21 @@ def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
         names = sorted({n.decode("utf-8", "surrogateescape") for n in logged.split(b"\0") if n.strip()})
         # `diff-files --raw -z`: ":<mode> <mode> <index sha> <worktree sha> <status>\0<path>\0".
         # A non-zero index sha is a staged blob whose working-tree copy differs.
-        for meta in git("diff-files", "-z", "--raw", "--no-abbrev").split(b"\0")[0::2]:
+        diff = git("diff-files", "-z", "--raw", "--no-abbrev").split(b"\0")
+        modified_paths = set(diff[1::2])
+        for meta in diff[0::2]:
             fields = meta.split(b" ")
             if len(fields) == 5 and fields[2].strip(b"0"):
                 wanted[fields[2]] = None
+        # A blob staged at a path whose working-tree copy is unmodified has
+        # the same bytes iter_scannable_files already read from disk, so it is
+        # skipped here rather than scanned twice. On a branch this is most of
+        # the HEAD versions, which are the largest blobs.
+        for entry in git("ls-files", "-s", "-z").split(b"\0"):
+            meta, _, path = entry.partition(b"\t")
+            fields = meta.split(b" ")
+            if len(fields) == 3 and path not in modified_paths:
+                wanted.pop(fields[1], None)
         batch = git("cat-file", "--batch", data=b"".join(s + b"\n" for s in wanted)) if wanted else b""
     except (subprocess.CalledProcessError, OSError) as exc:
         yield REPO_MARKER, DiscoveryFinding(
