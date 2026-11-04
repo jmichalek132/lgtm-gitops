@@ -716,12 +716,6 @@ ENV_CANONICAL_RE = re.compile(r'deployment_environment=~"([a-z|]+)"')
 _STRING_OR_COMMENT_RE = re.compile(
     r'''"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`|(?P<comment>#[^\n]*)'''
 )
-# Anchored to a selector position ('{' or ',' before the name): a LogQL line
-# filter chain such as |~ "a\\s+b" != "c" also puts a backslash-bearing string
-# before an operator, and must not be read as a label name.
-ENV_ESCAPED_NAME_RE = re.compile(
-    r'''[{,]\s*(?:"[^"\n]*\\[^"\n]*"|'[^'\n]*\\[^'\n]*')\s*(?:=~|!~|!=|=)'''
-)
 # LogQL stages that WRITE the label: '| label_format deployment_environment="prod"'
 # relabels every environment as prod, so reading it as a selector is wrong.
 # Applied to the string-blanked expression (env_label_writes), so a '|'
@@ -786,6 +780,23 @@ def _call_argument(blank: str, pos: int) -> tuple[str, int] | None:
     return None
 
 
+def has_escaped_label_name(expr: str) -> bool:
+    """True if a quoted label name in selector position carries a backslash
+    escape. Whole string TOKENS are examined, never text inside one: a
+    backtick regex such as `,"path\\name"=(.*)` only looks like a selector,
+    and must not be read as one. Selector position is '{' or ',' before the
+    token and a matcher operator after it, so a LogQL line-filter chain such
+    as |~ "a\\s+b" != "c" is not mistaken for a label name either."""
+    blank = _blank_strings(expr)
+    return any(
+        m.group(0)[0] in "\"'"
+        and "\\" in m.group(0)
+        and re.search(r"[{,]\s*$", blank[:m.start()])
+        and re.match(r"\s*(?:=~|!~|!=|=)", blank[m.end():])
+        for m in _STRING_RE.finditer(expr)
+    )
+
+
 def env_label_writes(expr: str) -> list[str]:
     """Every construct in a comment-stripped expression that WRITES
     deployment_environment rather than selecting on it, as a description."""
@@ -834,7 +845,7 @@ def check_env_matchers(root: Path) -> list[str]:
     for path, name, expr in iter_expressions(root):
         rel = path.relative_to(root)
         expr = _strip_comments(expr)
-        if ENV_ESCAPED_NAME_RE.search(expr):
+        if has_escaped_label_name(expr):
             findings.append(
                 f"{rel}: {name}: a quoted label name contains a backslash escape. The "
                 f"parser decodes it, so its environment matcher cannot be checked; "
