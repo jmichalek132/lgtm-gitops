@@ -1326,3 +1326,14 @@ def test_layout_rejects_a_filename_stem_starting_or_ending_in_a_hyphen(tmp_path,
     write(tmp_path, f"rules/payments/mimir/{name}")
     findings = rulecheck.check_layout(tmp_path)
     assert any("filename" in f for f in findings)
+
+
+@pytest.mark.parametrize("target, expr", [
+    ("mimir", r"""'label_replace(up, "out", "$1", "job", `,"path\\name"=(.*)`) == 0'"""),
+    ("loki", r"""'sum(count_over_time({job="x"} |= `{"path\\name"="value"}` [5m])) > 0'"""),
+])
+def test_envmatcher_escape_guard_ignores_text_inside_a_string(tmp_path, target, expr):
+    # Text inside a backtick string can look like '{"a\\b"=' without being a
+    # selector; only whole string tokens in selector position are label names.
+    write(tmp_path, f"rules/payments/{target}/a-alerts.yaml", expr_rule(expr))
+    assert rulecheck.check_env_matchers(tmp_path) == []
