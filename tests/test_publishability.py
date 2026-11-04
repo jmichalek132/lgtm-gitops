@@ -481,3 +481,13 @@ def test_empty_string_validation_runs_under_the_killable_deadline(tmp_path):
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_shipped_home_patterns_catch_non_ascii_usernames():
+    # The patterns on main matched any non-separator characters; narrowing the
+    # user-name class to ASCII stopped catching names such as élise.
+    patterns = {p["id"]: re.compile(p["regex"]) for p in load_publishability_config(REPO_ROOT)}
+    for directory, pattern_id in (("Users", "macos-home-path"), ("home", "linux-home-path")):
+        for separator in ("/", "\\/", "%2F"):
+            probe = separator + directory + separator + chr(233) + "lise" + separator + "rules.yaml"
+            assert patterns[pattern_id].search(probe), probe
