@@ -815,7 +815,7 @@ def test_path_matching_is_not_repeated_per_term(tmp_path, monkeypatch):
     assert len(path_calls) == len(terms)
 
 
-def test_scan_repository_whole_repo_completes_quickly():
+def test_scan_repository_whole_repo_completes_quickly(monkeypatch):
     """Whole-repository scan cost, recorded for the task report: 45 tracked
     files, one term, must stay well inside a sane budget rather than
     regressing toward the 137s/file quadratic blowup Task 6 measured and
@@ -826,9 +826,16 @@ def test_scan_repository_whole_repo_completes_quickly():
     harnesses impose) this scan measured a stable 18.6-19.5s on a tree and
     interpreter identical to an interactive-priority run that fit 15s, and
     the clamp cannot be lifted from inside the clamped process. 60s keeps
-    the quadratic-blowup tripwire while tolerating throttled runners."""
+    the quadratic-blowup tripwire while tolerating throttled runners.
+
+    This prices the working-tree scan only. The unpushed-object scan reads
+    every intermediate version of every file the local branch changed, so
+    its cost depends on the branch rather than the tree (measured
+    2026-11-02: 1.0 MiB of unpushed blobs on a 16-commit branch added 47s)
+    and would make this budget a measurement of how much is unpushed."""
     import time
 
+    monkeypatch.setattr(privatescan, "iter_unpushed_objects", lambda root: iter(()))
     start = time.perf_counter()
     scan_repository(REPO_ROOT, [{"id": "private-term-01", "value": "zephyrgate"}])
     elapsed = time.perf_counter() - start
