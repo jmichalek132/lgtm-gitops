@@ -157,10 +157,14 @@ within a fixed outer test deadline.
 > push publishes objects, not the working tree, so a term committed and then
 > removed in a later commit, a term only in a commit message, and a staged blob
 > edited clean on disk all scanned as clean and were then published. Gate 2 now
-> also scans every commit object, blob and path name reachable from `HEAD` but
-> from no remote-tracking ref, plus every staged blob that differs from its
-> working-tree copy. Findings for these name an object id or an index, never a
-> path. Gate 1 is unchanged: it still scans the working tree only.
+> also scans every commit object, blob and path name reachable from `HEAD` or a
+> local tag but from no remote-tracking ref, every local tag object and tag
+> name, and every staged blob that differs from its working-tree copy or whose
+> path carries skip-worktree, assume-unchanged or a filter attribute (a clean
+> status proves nothing about those). It reads original objects, with replace
+> refs and grafts disabled, because a push sends those. Findings for these name
+> an object id or an index, never a path. Gate 1 is unchanged: it still scans
+> the working tree only.
 
 The denylist lives **outside the repository**, at a path given by
 `PUBLISHABILITY_TERMS_FILE`:

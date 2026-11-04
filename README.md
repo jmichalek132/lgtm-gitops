@@ -130,9 +130,12 @@ terms: former internal codenames, personal names, anything that must never
 appear in the published history at all. Because the working tree is not what
 a push publishes, it also scans everything the next push would add: every
 commit (message and author lines), blob and path name reachable from `HEAD`
-but from no remote-tracking ref, and every staged blob that differs from its
-working-tree copy. A term committed and then deleted in a later commit is
-still a finding until that history is rewritten. Its denylist is **never** part of
+or a local tag but from no remote-tracking ref, every local tag message and
+tag name, and every staged blob that differs from its working-tree copy or
+sits behind a skip-worktree, assume-unchanged or filter setting. Replace refs
+and grafts are ignored, since a push sends the original objects. A term
+committed and then deleted in a later commit is still a finding until that
+history is rewritten. Its denylist is **never** part of
 this repository. It lives on disk outside the checkout, at whatever path
 `PUBLISHABILITY_TERMS_FILE` points to, and nothing derived from a term in it
 is ever committed here, not the term, not a hash, not a length. A finding
