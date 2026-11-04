@@ -604,15 +604,22 @@ def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
     Every discovery or read failure is a DiscoveryFinding, never a skip.
     """
 
+    # Replace refs and grafts change what local reads see, not what a push
+    # sends (git-replace(1): replacements affect reads, not pack transfer), so
+    # they could hide a real ancestor or substitute a clean blob for the one
+    # that is published. Every git call here reads the original objects.
+    git_env = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": os.devnull}
+
     def git(*args: str, data: bytes | None = None) -> bytes:
         return subprocess.run(
-            ["git", "-C", str(root), *args], input=data, capture_output=True, check=True
+            ["git", "-C", str(root), *args], input=data, capture_output=True,
+            check=True, env=git_env,
         ).stdout
 
     try:
         born = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD"],
-            capture_output=True,
+            capture_output=True, env=git_env,
         ).returncode == 0
         listing = git("rev-list", "--objects", "HEAD", "--not", "--remotes") if born else b""
         wanted: dict[bytes, None] = {}
