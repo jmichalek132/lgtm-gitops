@@ -1112,3 +1112,27 @@ def test_clean_status_does_not_hide_an_unscanned_staged_blob(tmp_path, monkeypat
     oid = _git(repo, "rev-parse", ":a.txt")
     findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
     assert any(f.startswith(f"blob {oid}: private-term-01") for f in findings), findings
+
+
+@pytest.mark.parametrize("kind", ["lightweight", "annotated", "nested"])
+def test_tagged_tree_path_names_are_scanned(tmp_path, monkeypatch, kind):
+    """A tag pointing straight at a tree has no commit for git log to report,
+    and `git push --tags` still publishes every file name inside it."""
+    _hermetic_git(monkeypatch)
+    repo = _git_repo(tmp_path)
+    (repo / "safe.txt").write_text("clean\n", encoding="utf-8")
+    blob = subprocess.run(["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+                          input="clean\n", text=True, capture_output=True, check=True).stdout.strip()
+    tree = subprocess.run(["git", "-C", str(repo), "mktree"],
+                          input=f"100644 blob {blob}\t{TERM}.txt\n",
+                          text=True, capture_output=True, check=True).stdout.strip()
+    if kind == "lightweight":
+        _git(repo, "tag", "safe", tree)
+    else:
+        _git(repo, "tag", "-a", "inner", tree, "-m", "clean")
+        if kind == "nested":
+            _git(repo, "tag", "-a", "outer", "inner", "-m", "clean")
+
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
+    assert any(f.startswith("unpushed path name #") and "private-term-01" in f for f in findings), findings
+    assert all(TERM not in f for f in findings)
