@@ -641,6 +641,13 @@ def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
             "log", "--format=", "--name-only", "-z", "--no-renames", "-m",
             *revisions, "--not", "--remotes",
         ) if revisions else b""
+        # A tag can point straight at a tree (possibly through nested annotated
+        # tags). git log only reports paths of commits, so the names inside a
+        # tagged tree come from ls-tree instead.
+        for ref in tag_refs:
+            target = git("rev-parse", "--verify", ref.decode("utf-8", "surrogateescape") + "^{}").strip()
+            if target in wanted and git("cat-file", "-t", target.decode("ascii")).strip() == b"tree":
+                logged += b"\0" + git("ls-tree", "-r", "-t", "--name-only", "-z", target.decode("ascii"))
         names = sorted({n.decode("utf-8", "surrogateescape") for n in logged.split(b"\0") if n.strip()})
         # `diff-files --raw -z`: ":<mode> <mode> <index sha> <worktree sha> <status>\0<path>\0".
         # A non-zero index sha is a staged blob whose working-tree copy differs.
