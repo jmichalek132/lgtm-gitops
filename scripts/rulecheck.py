@@ -1324,9 +1324,11 @@ def governed_probe_paths(root: Path, entry: str, patterns: list[str]) -> list[st
     # 'scripts/', although the pattern owns a future 'scripts/new.py'. Each
     # suffix of each witness is therefore also tried under the entry's
     # prefix, and kept only when the pattern really matches it.
+    if not prefix:  # a single-file entry is probed by its own path only
+        return sorted(probes)
     for pattern in patterns:
         regex = codeowners_pattern_regex(pattern)
-        if regex is None or not prefix:
+        if regex is None:
             continue
         for witness in codeowners_pattern_witnesses(pattern):
             parts = witness.split("/")
