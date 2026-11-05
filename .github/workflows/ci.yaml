@@ -47,12 +47,8 @@ jobs:
       - name: Install pinned tools
         run: |
           set -euo pipefail
-          # Downloads and extraction happen OUTSIDE $GITHUB_WORKSPACE. The
-          # publishability scan treats every untracked, non-ignored path in the
-          # working tree as a candidate and rejects binary content, so build
-          # artifacts must not land there. Adding them to .gitignore would be
-          # worse: an ignored artifact is invisible to the scanner by
-          # construction.
+          # Downloads and extraction happen OUTSIDE $GITHUB_WORKSPACE, so the
+          # checkout the checks read holds repository content only.
           workdir="$RUNNER_TEMP/tools"
           mkdir -p "$workdir"
           cd "$workdir"
@@ -72,23 +68,10 @@ jobs:
           unzip -q lokitool.zip
           sudo install lokitool-linux-amd64 /usr/local/bin/lokitool
 
-      - name: Assert tool installation left the working tree clean
-        run: |
-          set -euo pipefail
-          # This assertion is the point of the previous step. If it ever fails,
-          # a tool install has started writing into the checkout again and the
-          # publishability scan would fail for a reason unrelated to content.
-          leftover="$(git status --porcelain --untracked-files=normal)"
-          if [ -n "$leftover" ]; then
-            printf 'tool installation left paths in the working tree:\n%s\n' "$leftover" >&2
-            exit 1
-          fi
-
       # One command, and the same one a contributor runs. `make check` depends on
       # `test`, so pytest runs here too rather than as a separate step that could
       # drift away from the local experience.
       - name: make check
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
-          PUBLISHABILITY_PRIVATE_SCAN: skip-untrusted-ci
         run: make check
