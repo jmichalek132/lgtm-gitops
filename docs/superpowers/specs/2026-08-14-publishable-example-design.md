@@ -1,5 +1,11 @@
 # Making this repository publishable, design
 
+> **Superseded (2026-11-05).** The publishability gates this document designs
+> were removed from the repository once the one-time publication on 2026-09-02
+> was done (`scripts/privatescan.py`, `publishability.yaml` and their checks and
+> tests no longer exist). Kept as the dated record; it does not describe how the
+> repository works today.
+
 **Goal:** make `lgtm-gitops` safe to publish as a reusable example, and keep it
 safe, without losing what makes its design arguments convincing.
 
