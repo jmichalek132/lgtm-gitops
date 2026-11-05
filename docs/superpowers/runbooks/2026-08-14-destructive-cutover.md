@@ -1,5 +1,11 @@
 # Destructive Cutover Runbook
 
+> **Superseded (2026-11-05).** The publishability gates this document relies on
+> were removed from the repository once the one-time publication on 2026-09-02
+> was done (`scripts/privatescan.py`, `publishability.yaml` and their checks and
+> tests no longer exist). Kept as the dated record; it does not describe how the
+> repository works today.
+
 > **This is NOT an implementation plan and MUST NOT be executed by a subagent.**
 > It rewrites all history, force-pushes over a remote, and creates a public
 > repository. It is performed once, attended, by the operator, with an explicit

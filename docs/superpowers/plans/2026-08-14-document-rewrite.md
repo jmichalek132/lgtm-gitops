@@ -1,5 +1,11 @@
 # Document Rewrite Implementation Plan
 
+> **Superseded (2026-11-05).** The publishability gates this document verifies against
+> were removed from the repository once the one-time publication on 2026-09-02
+> was done (`scripts/privatescan.py`, `publishability.yaml` and their checks and
+> tests no longer exist). Kept as the dated record; it does not describe how the
+> repository works today.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** remove every private reference from the tracked documents while preserving the evidence that makes the design's arguments convincing.
