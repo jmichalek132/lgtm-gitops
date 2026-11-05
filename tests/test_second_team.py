@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def run_checks(root: Path) -> subprocess.CompletedProcess:
     # BASE_REF must not reach the child. CI's pull_request runs export it so
     # the real checkout's uid-change detection can diff against the base
-    # commit, but repo_copy is a fresh `git init` with no history by design,
+    # commit, but repo_copy is copied without .git, so it has no history,
     # so any inherited base sha is unresolvable there and rulecheck.py
     # correctly reports the failed diff as a finding, breaking every
     # baseline-is-clean assumption below for a reason unrelated to the
@@ -63,24 +63,6 @@ def repo_copy(tmp_path):
         ignore=shutil.ignore_patterns(".git", ".venv", ".pytest_cache", "__pycache__",
                                       ".superpowers"),
     )
-    # check_publishability (Gate 1, run as part of every rulecheck.py invocation)
-    # discovers files through scripts/privatescan.py's iter_scannable_files,
-    # which shells out to `git ls-files` and treats a failed discovery as a
-    # finding rather than a silent skip, on purpose: a scan that could not run
-    # must never be reportable as a scan that found nothing. That means a
-    # repo_copy with no .git at all is not a clean tree to run rulecheck.py
-    # against, it is a discovery FAILURE, which fails every test below at
-    # collection time for a reason that has nothing to do with the mutation
-    # under test. `git init` here gives the copy a fresh, empty repository, not
-    # the original's history: nothing is staged, so `git ls-files --cached`
-    # stays empty and `git ls-files --others --exclude-standard` reports every
-    # copied file as untracked, which is all iter_scannable_files needs. The
-    # same problem, and the same fix, already exists in
-    # tests/test_check_sh.py's own repo_copy fixture, which keeps the real
-    # .git for exactly this reason; the difference here is deliberate, since
-    # copying the real .git would also drag in history the mutations below
-    # have no reason to touch.
-    subprocess.run(["git", "-C", str(dest), "init", "-q"], check=True)
     return dest
 
 

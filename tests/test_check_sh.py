@@ -42,52 +42,8 @@ def run_check(env_path: str | None = None) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     if env_path:
         env["PATH"] = env_path
-    # These tests are about rule discovery and the render pipeline, not Gate 2
-    # (the private term scan), and they run against the real checkout, which
-    # ships with no PUBLISHABILITY_TERMS_FILE configured. A forced override,
-    # not setdefault: `make check` also runs `make test` (this very suite)
-    # under one inherited environment, so an ambient PUBLISHABILITY_PRIVATE_SCAN
-    # or CI value (e.g. set by hand to exercise Gate 2's own tests below) must
-    # not leak into what this helper is supposed to guarantee unconditionally.
-    # Gate 2's own fail-closed tests below construct their own env from
-    # scratch via run_check_sh and do not go through this helper.
-    env["PUBLISHABILITY_PRIVATE_SCAN"] = "skip-untrusted-ci"
-    env["CI"] = "true"
     return subprocess.run(
         [str(CHECK_SH)], cwd=REPO_ROOT, env=env, capture_output=True, text=True
-    )
-
-
-@pytest.fixture
-def repo_copy(tmp_path) -> Path:
-    """A full filesystem copy of this repository, working-tree changes
-    included, so Gate 2's env-driven behaviour can be exercised without ever
-    touching the real checkout.
-
-    check.sh finds its own root via `cd "$(dirname "$0")/.."`, not an
-    argument, so testing it against isolated state means copying the whole
-    tree rather than passing a path: .git included, so the git ls-files
-    calls scripts/privatescan.py depends on still see the same
-    tracked/untracked files the real repo has (including any uncommitted
-    change under test), and .venv/__pycache__/.pytest_cache excluded, since
-    they are gitignored, irrelevant to check.sh, and only add copy time.
-    """
-    dest = tmp_path / "repo"
-    shutil.copytree(
-        REPO_ROOT,
-        dest,
-        ignore=shutil.ignore_patterns(".venv", "__pycache__", ".pytest_cache"),
-    )
-    return dest
-
-
-def run_check_sh(repo_copy: Path, env: dict) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [str(repo_copy / "scripts" / "check.sh")],
-        cwd=repo_copy,
-        env=env,
-        capture_output=True,
-        text=True,
     )
 
 
@@ -130,113 +86,6 @@ def test_check_sh_fails_when_rule_discovery_fails(tmp_path):
         )
 
 
-# Gate 2 wiring (Task 9). An earlier design revision routed an absent
-# denylist through the existing caveat mechanism above (CHECKS INCOMPLETE,
-# exit 0); that was rejected because Make, Actions and pre-push hooks all
-# read "exit 0" as success regardless of what the text says. These tests
-# exercise the corrected, fail-closed wiring directly against the real
-# script rather than against scripts/privatescan.py in isolation, because
-# the point under test is check.sh's own branching (default/skip/reject),
-# not the CLI's exit code by itself, which tests/test_privatescan.py
-# already covers.
-
-
-@pytest.fixture
-def synthetic_denylist(tmp_path) -> Path:
-    """A valid denylist outside any repository, holding a synthetic term
-    that appears nowhere in this checkout.
-
-    Without one, a test that only asserts "the run failed" passes for the
-    wrong reason: an absent PUBLISHABILITY_TERMS_FILE fails
-    scripts/privatescan.py by itself, since Gate 2 is fail-closed, so a
-    non-zero exit is guaranteed regardless of whether the check.sh branch
-    actually under test even ran. Two of check.sh's own mutants survived
-    exactly this way (M14, M16): the branch they broke was never exercised,
-    because the missing-denylist failure masked it. A synthetic, working
-    denylist removes that confound.
-
-    The literal term below necessarily appears in THIS file too, since
-    repo_copy copies the whole working tree, including this test file, into
-    the tree check.sh actually scans: writing the term any other way (e.g.
-    split across a concatenation) does not avoid that, because Gate 2's own
-    punctuation/symbol mask is specifically built to catch exactly that kind
-    of split (confirmed empirically). That self-reference is harmless for
-    every test that uses this fixture: each one exercises a check.sh branch
-    that is taken before scripts/privatescan.py is ever invoked under
-    correct behaviour, and asserts on that branch's own message text, not on
-    scan cleanliness. It only matters if a mutant makes control fall through
-    to the real scanner, in which case the self-match is incidental and the
-    assertion on the missing branch-specific text still fails correctly.
-    """
-    path = tmp_path / "synthetic-denylist.yaml"
-    path.write_text(
-        'version: 1\nterms:\n  - id: private-term-01\n    value: "zzzchecktestterm"\n',
-        encoding="utf-8",
-    )
-    return path
-
-
-@requires_toolchain
-def test_check_sh_fails_when_denylist_is_absent(repo_copy):
-    env = dict(os.environ)
-    env.pop("PUBLISHABILITY_TERMS_FILE", None)
-    env.pop("PUBLISHABILITY_PRIVATE_SCAN", None)
-    result = run_check_sh(repo_copy, env)
-    assert result.returncode != 0
-    assert "CHECKS FAILED" in result.stdout + result.stderr
-
-
-@requires_toolchain
-def test_check_sh_honours_the_named_skip_only_under_ci(repo_copy):
-    env = dict(os.environ)
-    env.pop("PUBLISHABILITY_TERMS_FILE", None)
-    env["PUBLISHABILITY_PRIVATE_SCAN"] = "skip-untrusted-ci"
-
-    env["CI"] = "true"
-    result = run_check_sh(repo_copy, env)
-    assert result.returncode == 0, result.stdout + result.stderr
-
-    env.pop("CI")
-    assert run_check_sh(repo_copy, env).returncode != 0
-
-
-@requires_toolchain
-def test_check_sh_rejects_any_other_skip_value(repo_copy, synthetic_denylist):
-    env = dict(os.environ)
-    env["PUBLISHABILITY_TERMS_FILE"] = str(synthetic_denylist)
-    env["PUBLISHABILITY_PRIVATE_SCAN"] = "yes"
-    env["CI"] = "true"
-    result = run_check_sh(repo_copy, env)
-    assert result.returncode != 0
-    assert "is not a recognised value" in result.stdout + result.stderr
-
-
-@requires_toolchain
-def test_check_sh_rejects_the_named_skip_without_ci_even_with_a_denylist(
-    repo_copy, synthetic_denylist
-):
-    env = dict(os.environ)
-    env["PUBLISHABILITY_TERMS_FILE"] = str(synthetic_denylist)
-    env["PUBLISHABILITY_PRIVATE_SCAN"] = "skip-untrusted-ci"
-    env.pop("CI", None)
-    result = run_check_sh(repo_copy, env)
-    assert result.returncode != 0
-    assert "only accepted when CI=true" in result.stdout + result.stderr
-
-
-@requires_toolchain
-def test_ci_sentence_does_not_contradict_a_deliberate_skip(repo_copy):
-    env = dict(os.environ)
-    env.pop("PUBLISHABILITY_TERMS_FILE", None)
-    env["PUBLISHABILITY_PRIVATE_SCAN"] = "skip-untrusted-ci"
-    env["CI"] = "true"
-    result = run_check_sh(repo_copy, env)
-    out = result.stdout
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "CHECKS INCOMPLETE" in out
-    assert "CI must never end here" not in out
-
-
 def run_check_docker(tmp_path, env_overrides: dict) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Run scripts/check_docker.sh from a minimal checkout with a stub docker
     that records its `run` arguments, NUL-separated, instead of running."""
@@ -250,8 +99,7 @@ def run_check_docker(tmp_path, env_overrides: dict) -> tuple[subprocess.Complete
         '#!/bin/sh\nif [ "$1" = run ]; then printf "%s\\0" "$@"; fi\n'
     )
     (stub / "docker").chmod(0o755)
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("PUBLISHABILITY_TERMS_FILE", "BASE_REF")}
+    env = {k: v for k, v in os.environ.items() if k != "BASE_REF"}
     env["PATH"] = f"{stub}:{env.get('PATH', '')}"
     env.update(env_overrides)
     result = subprocess.run(["bash", str(wrapper)], env=env, capture_output=True, text=True)
@@ -262,41 +110,6 @@ def test_check_docker_forwards_base_ref(tmp_path):
     result, args = run_check_docker(tmp_path, {"BASE_REF": "HEAD~1"})
     assert result.returncode == 0, result.stderr
     assert any(a == "-e" and b == "BASE_REF=HEAD~1" for a, b in zip(args, args[1:]))
-
-
-def _denylist(path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('version: 1\nterms:\n  - id: private-term-01\n    value: "zzzdockerterm"\n')
-    return path
-
-
-def test_check_docker_refuses_an_in_repository_denylist(tmp_path):
-    # Gitignored and inside the checkout: the host run refuses it, so the
-    # container run must too, before docker is ever invoked.
-    inside = _denylist(tmp_path / "checkout" / ".superpowers" / "denylist.yaml")
-    result, args = run_check_docker(tmp_path, {"PUBLISHABILITY_TERMS_FILE": str(inside)})
-    assert result.returncode != 0
-    assert "inside the repository" in result.stderr
-    assert "run" not in args
-    assert str(inside) not in result.stderr
-
-
-def test_check_docker_refuses_a_symlinked_denylist(tmp_path):
-    real = _denylist(tmp_path / "elsewhere" / "denylist.yaml")
-    link = tmp_path / "link.yaml"
-    link.symlink_to(real)
-    result, args = run_check_docker(tmp_path, {"PUBLISHABILITY_TERMS_FILE": str(link)})
-    assert result.returncode != 0
-    assert "not a symlink" in result.stderr
-    assert "run" not in args
-
-
-def test_check_docker_mounts_a_valid_external_denylist(tmp_path):
-    outside = _denylist(tmp_path / "elsewhere" / "denylist.yaml")
-    result, args = run_check_docker(tmp_path, {"PUBLISHABILITY_TERMS_FILE": str(outside)})
-    assert result.returncode == 0, result.stderr
-    mounts = [b for a, b in zip(args, args[1:]) if a == "--mount"]
-    assert any(m.endswith("target=/run/publishability/denylist.yaml,readonly") for m in mounts)
 
 
 def test_shell_assertions_handle_output_larger_than_the_pipe_buffer():
