@@ -159,9 +159,10 @@ within a fixed outer test deadline.
 > edited clean on disk all scanned as clean and were then published. Gate 2 now
 > also scans every commit object, blob and path name reachable from `HEAD` or a
 > local tag but from no remote-tracking ref, every local tag object and tag
-> name, and every staged blob that differs from its working-tree copy or whose
-> path carries skip-worktree, assume-unchanged or a filter attribute (a clean
-> status proves nothing about those). It reads original objects, with replace
+> name, the names inside tagged trees, and every staged blob, skipping only
+> blobs whose git object id equals that of a file's exact bytes already
+> scanned on disk: equal ids prove equal bytes, which a clean status, given
+> filters, encodings and index flags, does not. It reads original objects, with replace
 > refs and grafts disabled, because a push sends those. Findings for these name
 > an object id or an index, never a path. Gate 1 is unchanged: it still scans
 > the working tree only.

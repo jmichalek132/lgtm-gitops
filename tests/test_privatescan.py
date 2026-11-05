@@ -831,11 +831,11 @@ def test_scan_repository_whole_repo_completes_quickly(monkeypatch):
     This prices the working-tree scan only. The unpushed-object scan reads
     every intermediate version of every file the local branch changed, so
     its cost depends on the branch rather than the tree (measured
-    2026-11-02: 1.3 MiB of unpushed blobs on a 16-commit branch added 53s)
+    2026-11-02: 1.0 MiB of unpushed blobs on a 16-commit branch added 47s)
     and would make this budget a measurement of how much is unpushed."""
     import time
 
-    monkeypatch.setattr(privatescan, "iter_unpushed_objects", lambda root: iter(()))
+    monkeypatch.setattr(privatescan, "iter_unpushed_objects", lambda root, scanned_ids=(): iter(()))
     start = time.perf_counter()
     scan_repository(REPO_ROOT, [{"id": "private-term-01", "value": "zephyrgate"}])
     elapsed = time.perf_counter() - start
@@ -1136,3 +1136,70 @@ def test_tagged_tree_path_names_are_scanned(tmp_path, monkeypatch, kind):
     findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
     assert any(f.startswith("unpushed path name #") and "private-term-01" in f for f in findings), findings
     assert all(TERM not in f for f in findings)
+
+
+def test_git_blob_ids_match_git_hash_object(tmp_path, monkeypatch):
+    _hermetic_git(monkeypatch)
+    repo = _git_repo(tmp_path)
+    for data in (b"", b"clean\n", "花見\n".encode("utf-8"), b"\xef\xbb\xbfbom\r\n"):
+        expected = subprocess.run(["git", "-C", str(repo), "hash-object", "--stdin"],
+                                  input=data, capture_output=True, check=True).stdout.strip()
+        assert expected in privatescan.git_blob_ids(data)
+
+
+def test_staged_working_tree_encoding_blob_is_scanned(tmp_path, monkeypatch):
+    """working-tree-encoding stores different bytes from the file on disk
+    with no filter attribute and no index flag, and a clean status."""
+    _hermetic_git(monkeypatch)
+    repo = _git_repo(tmp_path)
+    term = "花見"  # synthetic
+    (repo / ".gitattributes").write_text("a.txt working-tree-encoding=ISO-2022-JP\n", encoding="utf-8")
+    path = repo / "a.txt"
+    path.write_bytes("other\n".encode("iso2022_jp"))
+    _git(repo, "add", "-A")
+    _commit(repo, "-m", "initial")
+    path.write_bytes((term + "\n").encode("iso2022_jp"))
+    _git(repo, "add", "a.txt")
+
+    assert _git(repo, "diff-files", "--name-only") == ""
+    assert privatescan.find_term(path.read_text(encoding="utf-8"), privatescan.normalise(term)) is None
+    oid = _git(repo, "rev-parse", ":a.txt")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": term}])
+    assert any(f.startswith(f"blob {oid}: private-term-01") for f in findings), findings
+    assert all(term not in f for f in findings)
+
+
+@pytest.mark.parametrize("driver", ["unset", "unspecified"])
+def test_staged_filter_named_like_a_check_attr_status_word_is_scanned(tmp_path, monkeypatch, driver):
+    """check-attr prints a driver named 'unset' or 'unspecified' exactly like
+    its own "no filter" answers."""
+    _hermetic_git(monkeypatch)
+    repo = _git_repo(tmp_path)
+    _synthetic_filter(repo)
+    for setting in ("clean", "smudge"):
+        _git(repo, "config", f"filter.{driver}.{setting}", _git(repo, "config", "--get", f"filter.synthetic.{setting}"))
+    (repo / ".gitattributes").write_text(f"a.txt filter={driver}\n", encoding="utf-8")
+    path = repo / "a.txt"
+    path.write_text("other\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _commit(repo, "-m", "initial")
+    path.write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+
+    assert _git(repo, "diff-files", "--name-only") == ""
+    assert _git(repo, "show", ":a.txt") == TERM
+    oid = _git(repo, "rev-parse", ":a.txt")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
+    assert any(f.startswith(f"blob {oid}: private-term-01") for f in findings), findings
+
+
+def test_a_blob_identical_to_a_scanned_file_is_not_reported_twice(tmp_path, monkeypatch):
+    """The byte-identity proof drops an unpushed blob equal to a file already
+    scanned from disk, so one term in one unchanged file is one finding."""
+    _hermetic_git(monkeypatch)
+    repo = _git_repo(tmp_path)
+    (repo / "a.txt").write_text(f"a {TERM} b\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _commit(repo, "-m", "initial")
+    findings = scan_repository(repo, [{"id": "private-term-01", "value": TERM}])
+    assert findings == ["a.txt: private-term-01 (view=source, mask=())"], findings

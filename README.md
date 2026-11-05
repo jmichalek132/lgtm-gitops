@@ -131,8 +131,9 @@ appear in the published history at all. Because the working tree is not what
 a push publishes, it also scans everything the next push would add: every
 commit (message and author lines), blob and path name reachable from `HEAD`
 or a local tag but from no remote-tracking ref, every local tag message and
-tag name, and every staged blob that differs from its working-tree copy or
-sits behind a skip-worktree, assume-unchanged or filter setting. Replace refs
+tag name, and every staged blob whose bytes are not exactly a file already
+scanned on disk (compared by git object id, so filters, encodings and index
+flags cannot hide one). Replace refs
 and grafts are ignored, since a push sends the original objects. A term
 committed and then deleted in a later commit is still a finding until that
 history is rewritten. Its denylist is **never** part of
