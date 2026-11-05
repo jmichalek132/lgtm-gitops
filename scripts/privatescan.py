@@ -7,6 +7,7 @@ a matched substring, or the denylist path.
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import re
 import stat
@@ -588,13 +589,25 @@ def iter_scannable_files(root: Path) -> Iterator[tuple[str, str]]:
         )
 
 
-def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
+def git_blob_ids(data: bytes) -> tuple[bytes, bytes]:
+    """The git object id of a blob holding exactly `data`, in the SHA-1 and
+    the SHA-256 object format, as hex bytes like rev-list prints them."""
+    header = b"blob %d\0" % len(data)
+    return tuple(  # type: ignore[return-value]
+        hashlib.new(alg, header + data).hexdigest().encode("ascii") for alg in ("sha1", "sha256")
+    )
+
+
+def iter_unpushed_objects(
+    root: Path, scanned_ids: frozenset[bytes] | set[bytes] = frozenset()
+) -> Iterator[tuple[str, str]]:
     """Yield (label, text) for what the next push publishes beyond the
     working tree: every commit object (message and author lines) and blob
     reachable from HEAD or a local tag but from no remote-tracking ref, every
-    path name those commits recorded, every local tag object and tag name,
-    and the staged blob of every path whose working-tree copy differs from
-    the index.
+    path name those commits (or tagged trees) recorded, every local tag
+    object and tag name, and every staged blob. A blob whose git object id is
+    in `scanned_ids` holds exactly the bytes already scanned from disk, so it
+    is skipped.
 
     iter_scannable_files reads the WORKING TREE, so on its own a term that
     was committed and then removed in a later commit, a term that appears
@@ -649,36 +662,21 @@ def iter_unpushed_objects(root: Path) -> Iterator[tuple[str, str]]:
             if target in wanted and git("cat-file", "-t", target.decode("ascii")).strip() == b"tree":
                 logged += b"\0" + git("ls-tree", "-r", "-t", "--name-only", "-z", target.decode("ascii"))
         names = sorted({n.decode("utf-8", "surrogateescape") for n in logged.split(b"\0") if n.strip()})
-        # `diff-files --raw -z`: ":<mode> <mode> <index sha> <worktree sha> <status>\0<path>\0".
-        # A non-zero index sha is a staged blob whose working-tree copy differs.
-        for meta in git("diff-files", "-z", "--raw", "--no-abbrev").split(b"\0")[0::2]:
-            fields = meta.split(b" ")
-            if len(fields) == 5 and fields[2].strip(b"0"):
-                wanted[fields[2]] = None
-        # A clean diff-files status does not prove the bytes iter_scannable_files
-        # read from disk are the index blob: skip-worktree and assume-unchanged
-        # hide a changed copy, and a clean/smudge filter makes the two differ by
-        # design. Those paths' index blobs are read directly. Every blob of an
-        # unpushed commit is scanned regardless, even if it equals a file on
-        # disk, because a clean status cannot vouch for it either.
-        # `ls-files -v -s`: "<tag> <mode> <sha> <stage>\t<path>"; a lowercase
-        # tag is assume-unchanged, S is skip-worktree.
-        index = [e for e in git("ls-files", "-v", "-s", "-z").split(b"\0") if e]
-        paths = [e.partition(b"\t")[2] for e in index]
-        attrs = git(
-            "check-attr", "-z", "--stdin", "filter", data=b"".join(q + b"\0" for q in paths)
-        ).split(b"\0") if paths else []
-        filtered = {
-            attrs[i] for i in range(0, len(attrs) - 2, 3)
-            if attrs[i + 2] not in (b"unspecified", b"unset")
-        }
-        for entry in index:
-            meta, _, path = entry.partition(b"\t")
-            fields = meta.split(b" ")
-            if len(fields) != 4 or fields[1] == b"160000":  # 160000: a gitlink
-                continue
-            if fields[0].islower() or fields[0] == b"S" or path in filtered:
-                wanted[fields[2]] = None
+        # Every staged blob is in scope, then every id whose exact bytes were
+        # already scanned from disk is dropped (scanned_ids). Equal git object
+        # ids prove equal bytes, so whatever makes a stored blob differ from
+        # its file on disk (a clean/smudge filter, a working-tree-encoding,
+        # skip-worktree or assume-unchanged, a driver named like a check-attr
+        # status word) leaves that blob in scope by construction, with no
+        # per-feature rule to keep up to date. The same proof skips the
+        # unchanged HEAD versions of files, the largest unpushed blobs.
+        # `ls-files -s -z`: "<mode> <sha> <stage>\t<path>"; 160000 is a gitlink.
+        for entry in git("ls-files", "-s", "-z").split(b"\0"):
+            fields = entry.partition(b"\t")[0].split(b" ")
+            if len(fields) == 3 and fields[0] != b"160000":
+                wanted[fields[1]] = None
+        for oid in scanned_ids:
+            wanted.pop(oid, None)
         batch = git("cat-file", "--batch", data=b"".join(s + b"\n" for s in wanted)) if wanted else b""
     except (subprocess.CalledProcessError, OSError) as exc:
         yield REPO_MARKER, DiscoveryFinding(
@@ -745,6 +743,7 @@ def scan_repository(root: Path, terms: list[dict]) -> list[str]:
     normalised = [(t["id"], normalise(t["value"])) for t in terms]
 
     findings: list[str] = []
+    scanned_ids: set[bytes] = set()
     for path, payload in iter_scannable_files(root):
         path_hits = [(term_id, find_term(path, needle)) for term_id, needle in normalised]
         safe = REDACTED_PATH if any(hit is not None for _, hit in path_hits) else _escape_path(path)
@@ -752,6 +751,9 @@ def scan_repository(root: Path, terms: list[dict]) -> list[str]:
         if isinstance(payload, DiscoveryFinding):
             findings.append(payload.replace(path, safe, 1))
             continue
+        # payload is a strict UTF-8 decode of the file's bytes, so encoding it
+        # back yields exactly those bytes.
+        scanned_ids.update(git_blob_ids(payload.encode("utf-8")))
 
         for term_id, hit in path_hits:
             if hit is not None:
@@ -761,7 +763,7 @@ def scan_repository(root: Path, terms: list[dict]) -> list[str]:
             if hit is not None:
                 findings.append(f"{safe}: {term_id} (view={hit[0]}, mask={hit[1]})")
 
-    for label, payload in iter_unpushed_objects(root):
+    for label, payload in iter_unpushed_objects(root, scanned_ids):
         if isinstance(payload, DiscoveryFinding):
             findings.append(str(payload))
             continue
